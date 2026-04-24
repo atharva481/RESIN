@@ -1,0 +1,158 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* RESIN Design System
+ * Editorial / research-paper aesthetic.
+ * Warm paper background, deep ink foreground, single mossy-teal accent.
+ * No AI-style purple gradients.
+ */
+
+@layer base {
+  :root {
+    --background: 38 30% 97%;          /* warm paper */
+    --foreground: 220 22% 14%;         /* ink */
+
+    --card: 38 40% 99%;
+    --card-foreground: 220 22% 14%;
+
+    --popover: 38 40% 99%;
+    --popover-foreground: 220 22% 14%;
+
+    --primary: 172 56% 24%;            /* deep mossy teal */
+    --primary-foreground: 38 40% 98%;
+    --primary-glow: 172 50% 40%;
+
+    --secondary: 36 24% 92%;
+    --secondary-foreground: 220 22% 14%;
+
+    --muted: 36 18% 90%;
+    --muted-foreground: 220 10% 38%;
+
+    --accent: 18 78% 56%;              /* warm rust accent */
+    --accent-foreground: 38 40% 98%;
+
+    --destructive: 0 70% 48%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 30 14% 84%;
+    --input: 30 14% 84%;
+    --ring: 172 56% 24%;
+
+    --radius: 0.5rem;
+
+    /* Custom tokens */
+    --ink: 220 22% 14%;
+    --ink-soft: 220 12% 32%;
+    --paper: 38 30% 97%;
+    --paper-dark: 36 18% 90%;
+    --highlight: 48 90% 78%;           /* paper highlighter */
+    --node-citation: 172 56% 30%;
+    --node-author: 18 78% 56%;
+    --node-topic: 220 30% 50%;
+
+    --gradient-paper: linear-gradient(180deg, hsl(38 35% 98%), hsl(36 22% 92%));
+    --gradient-ink: linear-gradient(135deg, hsl(220 22% 14%), hsl(220 28% 22%));
+    --gradient-accent: linear-gradient(135deg, hsl(172 56% 24%), hsl(172 50% 40%));
+
+    --shadow-paper: 0 1px 0 hsl(30 14% 84% / 0.6), 0 8px 24px -12px hsl(220 22% 14% / 0.12);
+    --shadow-lift: 0 12px 32px -12px hsl(220 22% 14% / 0.18);
+    --shadow-ink: 0 1px 2px hsl(220 22% 14% / 0.08);
+
+    --transition-smooth: all 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+
+    --sidebar-background: 36 22% 94%;
+    --sidebar-foreground: 220 22% 14%;
+    --sidebar-primary: 172 56% 24%;
+    --sidebar-primary-foreground: 38 40% 98%;
+    --sidebar-accent: 36 28% 88%;
+    --sidebar-accent-foreground: 220 22% 14%;
+    --sidebar-border: 30 14% 80%;
+    --sidebar-ring: 172 56% 24%;
+  }
+
+  .dark {
+    --background: 220 18% 9%;
+    --foreground: 38 28% 94%;
+    --card: 220 18% 11%;
+    --card-foreground: 38 28% 94%;
+    --popover: 220 18% 11%;
+    --popover-foreground: 38 28% 94%;
+    --primary: 172 50% 55%;
+    --primary-foreground: 220 18% 9%;
+    --primary-glow: 172 60% 65%;
+    --secondary: 220 14% 16%;
+    --secondary-foreground: 38 28% 94%;
+    --muted: 220 14% 16%;
+    --muted-foreground: 220 10% 65%;
+    --accent: 18 78% 60%;
+    --accent-foreground: 220 18% 9%;
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 14% 20%;
+    --input: 220 14% 20%;
+    --ring: 172 50% 55%;
+    --sidebar-background: 220 18% 8%;
+    --sidebar-foreground: 38 28% 94%;
+    --sidebar-primary: 172 50% 55%;
+    --sidebar-primary-foreground: 220 18% 9%;
+    --sidebar-accent: 220 14% 14%;
+    --sidebar-accent-foreground: 38 28% 94%;
+    --sidebar-border: 220 14% 18%;
+    --sidebar-ring: 172 50% 55%;
+  }
+}
+
+@layer base {
+  * { @apply border-border; }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "ss01", "cv11";
+  }
+  h1, h2, h3, h4 { font-family: 'Fraunces', 'Georgia', serif; letter-spacing: -0.02em; }
+  .font-serif-display { font-family: 'Fraunces', 'Georgia', serif; }
+  .font-mono-tech { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+}
+
+@layer utilities {
+  .bg-gradient-paper { background-image: var(--gradient-paper); }
+  .bg-gradient-ink { background-image: var(--gradient-ink); }
+  .bg-gradient-accent { background-image: var(--gradient-accent); }
+  .shadow-paper { box-shadow: var(--shadow-paper); }
+  .shadow-lift { box-shadow: var(--shadow-lift); }
+  .transition-smooth { transition: var(--transition-smooth); }
+  .text-balance { text-wrap: balance; }
+
+  .paper-grain {
+    background-image:
+      radial-gradient(hsl(220 22% 14% / 0.025) 1px, transparent 1px),
+      radial-gradient(hsl(220 22% 14% / 0.018) 1px, transparent 1px);
+    background-size: 24px 24px, 32px 32px;
+    background-position: 0 0, 12px 16px;
+  }
+
+  .highlight-mark {
+    background: linear-gradient(180deg, transparent 60%, hsl(var(--highlight) / 0.7) 60%);
+    padding: 0 0.15em;
+  }
+
+  .scroll-fade-mask {
+    mask-image: linear-gradient(to bottom, black calc(100% - 32px), transparent);
+  }
+
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes pulse-ring {
+    0%, 100% { box-shadow: 0 0 0 0 hsl(var(--primary) / 0.35); }
+    50% { box-shadow: 0 0 0 8px hsl(var(--primary) / 0); }
+  }
+  .animate-fade-up { animation: fade-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+  .animate-fade-in { animation: fade-in 0.4s ease-out both; }
+  .animate-pulse-ring { animation: pulse-ring 2s infinite; }
+}
