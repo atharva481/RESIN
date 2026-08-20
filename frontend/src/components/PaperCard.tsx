@@ -1,7 +1,10 @@
-import { Quote, Calendar, Users, ExternalLink } from "lucide-react";
+import { Quote, Calendar, Users, ExternalLink, MessageSquare } from "lucide-react";
 import type { Paper } from "@/lib/types";
 import { SaveToFolder } from "@/components/SaveToFolder";
 import { AISummary } from "@/components/AISummary";
+import { PaperChat } from "@/components/PaperChat";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { upsertPaper, getSummary } from "@/lib/db";
 import { useEffect, useState } from "react";
 import type { PaperSummary } from "@/lib/types";
@@ -71,6 +74,27 @@ export function PaperCard({ paper, persistedId }: PaperCardProps) {
 
       <div className="flex flex-wrap items-center gap-2">
         <AISummaryWrapper paper={paper} initial={summary} ensurePersisted={ensurePersisted} />
+        
+        <Dialog>
+          <DialogTrigger asChild>
+            <Button variant="outline" size="sm" className="gap-1.5 text-xs h-8">
+              <MessageSquare className="h-3.5 w-3.5 text-primary" />
+              Ask AI (RAG Chat)
+            </Button>
+          </DialogTrigger>
+          <DialogContent className="max-w-2xl p-4 sm:p-6">
+            <DialogHeader className="mb-2">
+              <DialogTitle className="text-lg font-serif-display line-clamp-1">
+                Chat with: {paper.title}
+              </DialogTitle>
+              <DialogDescription className="text-xs text-muted-foreground">
+                Ask questions and retrieve insights grounded in this paper using AI.
+              </DialogDescription>
+            </DialogHeader>
+            <PaperChat paper={paper} />
+          </DialogContent>
+        </Dialog>
+
         {paper.doi && (
           <a
             href={`https://doi.org/${paper.doi}`}

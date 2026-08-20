@@ -39,9 +39,22 @@ export async function generatePaperSummary(args: {
   authors: string[];
   year: number | null;
 }): Promise<Omit<PaperSummary, "paper_id" | "generated_at">> {
-  const prompt = `You are a research analyst. Read the paper metadata and produce a clear, plain-English structured digest. Avoid jargon. Each section: 1-3 sentences max.
+  const prompt = `You are a research analyst. Read the paper metadata and produce a clear, plain-English structured digest.
 
-Return JSON ONLY with keys: problem, method, findings, limitations, significance.
+Rules:
+- Avoid jargon. Be concise and factual.
+- Each field must be 1–3 sentences only.
+- Do NOT add any text outside the JSON.
+- If information is missing, infer cautiously or state "Not واضح from provided data".
+
+Return STRICT JSON with exactly these keys:
+{
+  "problem": "",
+  "method": "",
+  "findings": "",
+  "limitations": "",
+  "significance": ""
+}
 
 PAPER:
 Title: ${args.title}
@@ -49,6 +62,7 @@ Authors: ${args.authors.join(", ")}
 Year: ${args.year ?? "n/a"}
 Abstract: ${args.abstract ?? "(no abstract available — infer from title)"}
 `;
+
   const text = await callGemini(prompt);
   try {
     const obj = JSON.parse(text);
@@ -66,7 +80,7 @@ Abstract: ${args.abstract ?? "(no abstract available — infer from title)"}
 
 export async function summariseArticle(title: string, description: string | null): Promise<string> {
   if (!KEY) return description ?? "";
-  const prompt = `Summarise this tech news article in EXACTLY 2 short sentences (max 35 words total). Plain English, no hype.
+  const prompt = `Summarize the following tech news article in EXACTLY 2 sentences and no more than 35 words total. Keep language simple, neutral, and factual. No hype, no opinions, no extra details.
 
 Title: ${title}
 Description: ${description ?? ""}

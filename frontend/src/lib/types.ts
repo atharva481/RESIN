@@ -61,3 +61,29 @@ export interface CitationEdge {
   edge_type: "direct_citation" | "shared_citation" | "same_author" | "topic_similarity";
   weight: number;
 }
+
+// RAG Specific Types
+export interface RagCitation {
+  section_title?: string;
+  chunk_index: number;
+  content_snippet: string;
+  similarity_score: number;
+}
+
+export interface RagChatMessage {
+  role: "user" | "assistant";
+  content: string;
+  citations?: RagCitation[];
+}
+
+export interface RagChatResponse {
+  answer: string;
+  citations: RagCitation[];
+}
+
+export interface RagIndexResponse {
+  paper_id: string;
+  chunks_created: number;
+  status: "success" | "warning" | "error";
+  message: string;
+}

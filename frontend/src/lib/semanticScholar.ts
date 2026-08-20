@@ -1,11 +1,13 @@
 /**
- * Semantic Scholar client. Public API, no key required for low traffic.
- * Docs: https://api.semanticscholar.org/graph/v1
+ * Semantic Scholar client.
+ * Routes via FastAPI backend search proxy (/api/papers/search) to bypass browser CORS restrictions.
  */
 import type { Paper } from "@/lib/types";
 
-const BASE = "https://api.semanticscholar.org/graph/v1";
+const BACKEND_URL = import.meta.env.VITE_RAG_BACKEND_URL || "http://localhost:8000";
+const DIRECT_BASE = "https://api.semanticscholar.org/graph/v1";
 const SS_KEY = import.meta.env.VITE_SEMANTIC_SCHOLAR_API_KEY as string | undefined;
+
 const ssHeaders = (): HeadersInit => (SS_KEY ? { "x-api-key": SS_KEY } : {});
 const FIELDS = [
   "paperId",
@@ -45,27 +47,44 @@ const toPaper = (p: SSPaper): Paper => ({
 
 export async function searchPapers(query: string, limit = 20): Promise<Paper[]> {
   if (!query.trim()) return [];
-  const url = `${BASE}/paper/search?query=${encodeURIComponent(query)}&limit=${limit}&fields=${FIELDS}`;
-  const res = await fetch(url, { headers: ssHeaders() });
-  if (!res.ok) {
-    if (res.status === 429) {
-      throw new Error("Too many requests (Rate limited). Semantic Scholar's public API is strict. Please try again in a few minutes, or add VITE_SEMANTIC_SCHOLAR_API_KEY to your .env file for higher limits.");
-    }
-    throw new Error(`Semantic Scholar search failed (${res.status})`);
+
+  // Route via FastAPI Backend Search Proxy (Bypasses Browser CORS)
+  const proxyUrl = `${BACKEND_URL}/api/papers/search?query=${encodeURIComponent(query)}&limit=${limit}`;
+  const res = await fetch(proxyUrl);
+  if (res.ok) {
+    const json = await res.json();
+    const data = (json.data ?? []) as SSPaper[];
+    return data.map(toPaper);
   }
-  const json = await res.json();
-  const data = (json.data ?? []) as SSPaper[];
-  return data.map(toPaper);
+
+  let errorDetail = `Search request failed with status ${res.status}`;
+  try {
+    const errJson = await res.json();
+    if (errJson.detail) errorDetail = errJson.detail;
+  } catch {
+    // Keep generic error detail if JSON parsing fails
+  }
+  throw new Error(errorDetail);
 }
 
 export async function getPaperById(ssId: string): Promise<Paper | null> {
-  const res = await fetch(`${BASE}/paper/${ssId}?fields=${FIELDS}`, { headers: ssHeaders() });
-  if (!res.ok) {
-    if (res.status === 429) {
-      throw new Error("Too many requests (Rate limited). Please try again later or add an API key.");
-    }
+  // Route via FastAPI Backend Search Proxy
+  const proxyUrl = `${BACKEND_URL}/api/papers/${ssId}`;
+  const res = await fetch(proxyUrl);
+  if (res.ok) {
+    const p = (await res.json()) as SSPaper;
+    return toPaper(p);
+  }
+  if (res.status === 404) {
     return null;
   }
-  const p = (await res.json()) as SSPaper;
-  return toPaper(p);
+
+  let errorDetail = `Paper fetch failed with status ${res.status}`;
+  try {
+    const errJson = await res.json();
+    if (errJson.detail) errorDetail = errJson.detail;
+  } catch {
+    // Keep generic error detail if JSON parsing fails
+  }
+  throw new Error(errorDetail);
 }

@@ -32,8 +32,19 @@ export async function fetchTechNews(query: string, topics: string[] = []): Promi
   if (!KEY) return [];
   const q = encodeURIComponent(query || "(AI OR machine learning OR robotics OR LLM OR biotech)");
   const url = `https://newsapi.org/v2/everything?q=${q}&language=en&sortBy=publishedAt&pageSize=30&apiKey=${KEY}`;
+  
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`NewsAPI failed (${res.status})`);
+  if (!res.ok) {
+    const errorText = await res.text().catch(() => "Unknown error");
+    throw new Error(`NewsAPI failed (${res.status}): ${errorText}`);
+  }
   const json = await res.json();
-  return (json.articles as NewsArticle[]).map((a) => toFeedItem(a, topics));
+  
+  if (!json.articles || !Array.isArray(json.articles)) {
+    return [];
+  }
+
+  return (json.articles as NewsArticle[])
+    .filter((a) => a.title && a.title !== "[Removed]" && a.url)
+    .map((a) => toFeedItem(a, topics));
 }
