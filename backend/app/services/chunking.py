@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -12,6 +12,7 @@ class TextChunk(BaseModel):
     content: str
     word_count: int
     paper_id: str
+    page_number: Optional[int] = None
 
 
 class TextChunker:
@@ -78,12 +79,51 @@ class TextChunker:
         combined_text = full_text if full_text and len(full_text.strip()) > 0 else f"Title: {title}\n\nAbstract: {abstract}"
         return self.chunk_text(text=combined_text, paper_id=paper_id, start_index=0, section_title="Main Content")
 
+    def chunk_pages(
+        self,
+        paper_id: str,
+        pages_data: List[Dict[str, Any]],
+    ) -> List[TextChunk]:
+        """Chunk PDF content page-by-page preserving exact page numbers and sections."""
+        chunks: List[TextChunk] = []
+        chunk_idx = 0
+
+        for page in pages_data:
+            page_num = page.get("page_number")
+            sections = page.get("sections") or {}
+
+            if isinstance(sections, dict) and sections:
+                for sec_title, sec_content in sections.items():
+                    sub_chunks = self.chunk_text(
+                        text=sec_content,
+                        paper_id=paper_id,
+                        start_index=chunk_idx,
+                        section_title=sec_title,
+                        page_number=page_num,
+                    )
+                    chunks.extend(sub_chunks)
+                    chunk_idx += len(sub_chunks)
+            else:
+                text = page.get("text", "")
+                sub_chunks = self.chunk_text(
+                    text=text,
+                    paper_id=paper_id,
+                    start_index=chunk_idx,
+                    section_title=f"Page {page_num}",
+                    page_number=page_num,
+                )
+                chunks.extend(sub_chunks)
+                chunk_idx += len(sub_chunks)
+
+        return chunks
+
     def chunk_text(
         self,
         text: str,
         paper_id: str,
         start_index: int = 0,
         section_title: Optional[str] = None,
+        page_number: Optional[int] = None,
     ) -> List[TextChunk]:
         words = self._split_into_words(text)
         if not words:
@@ -105,6 +145,7 @@ class TextChunker:
                     content=f"{prefix}{chunk_str}",
                     word_count=len(chunk_words),
                     paper_id=paper_id,
+                    page_number=page_number,
                 )
             )
             chunk_idx += 1

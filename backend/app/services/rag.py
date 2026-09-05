@@ -9,6 +9,12 @@ from app.core.supabase import get_supabase_client
 from app.schemas.chat import ChatMessage, ChatResponse, Citation
 from app.services.retrieval import RetrievalService
 
+from app.agent.formatter import (
+    clean_markdown_output,
+    detect_question_intent,
+    get_intent_formatting_instructions,
+)
+
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
@@ -65,14 +71,19 @@ def _with_retry(fn, *args, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY, **k
 
 
 SYSTEM_RAG_PROMPT = """You are an expert scientific AI research assistant for the RESIN platform.
-Answer the user's question accurately based strictly on the provided research paper context chunks below.
+Answer the user's question accurately based strictly on the provided research paper evidence below.
 
-Guidelines:
-1. Cite relevant paper sections using inline section titles, e.g. [Section: Abstract] or [Section: Results].
-2. If the context does not contain sufficient details to answer the question, state that clearly rather than hallucinating.
-3. Be clear, concise, and academically rigorous.
+ANSWER FORMAT & READABILITY RULES:
+1. Always generate valid unescaped Markdown (- **Bold**, *italic*, `code`, ### Heading). Never output escaped markdown like \* \*\*text\*\*.
+2. Answer DIRECTLY. Never start with "Based on the provided context...", "According to the retrieved context...", or "From the information provided...".
+3. Keep paragraphs short (2-4 sentences). Use bullet lists for methods/findings, numbered lists for procedures, and Markdown tables ONLY for comparisons.
+4. Adapt answer structure dynamically to the query (simple questions get direct answers; complex questions get structured sections).
+5. Never expose internal system tags like [Section: Main Content].
+6. Grounding: Answer strictly from provided evidence. If details are insufficient to answer confidently, state: "I couldn't find enough evidence in the indexed paper to answer that confidently."
 
-Paper Context Chunks:
+{formatting_instructions}
+
+Paper Evidence Context:
 {context_blocks}
 """
 
@@ -86,14 +97,18 @@ class RAGService:
         _ensure_configured()
 
     def _format_context(self, citations: List[Citation]) -> str:
-        """Format chunk citations into text blocks for RAG prompt."""
+        """Format chunk citations into clean text evidence blocks for RAG prompt."""
         if not citations:
             return "No relevant paper context chunks found."
         blocks = []
         for cit in citations:
-            sec = cit.section_title or f"Chunk {cit.chunk_index}"
+            sec = cit.section_title or f"Chunk #{cit.chunk_index}"
+            if sec.startswith("[Section:") and sec.endswith("]"):
+                sec = sec[9:-1].strip()
+            page_str = f" | Page {cit.page_number}" if cit.page_number else ""
+            title_str = f"Paper: {cit.paper_title}\n" if cit.paper_title else ""
             snippet = cit.content_snippet
-            blocks.append(f"--- Section: {sec} ---\n{snippet}")
+            blocks.append(f"{title_str}Section: {sec}{page_str}\nEvidence:\n{snippet}")
         return "\n\n".join(blocks)
 
     def _format_context_from_papers(self, paper_rows: List[Dict[str, Any]]) -> str:
@@ -104,7 +119,7 @@ class RAGService:
         for idx, paper in enumerate(paper_rows, 1):
             title = paper.get("title", "Untitled")
             abstract = paper.get("abstract", "")
-            block = f"--- Paper {idx} ---\nTitle: {title}\nAbstract: {abstract}"
+            block = f"Paper {idx}: {title}\nAbstract: {abstract}"
             blocks.append(block)
         return "\n\n".join(blocks)
 
@@ -135,8 +150,13 @@ class RAGService:
             top_k=4,
         )
 
+        intent = detect_question_intent(question)
+        fmt_instructions = get_intent_formatting_instructions(intent)
         context_str = self._format_context(citations)
-        system_instruction = SYSTEM_RAG_PROMPT.format(context_blocks=context_str)
+        system_instruction = SYSTEM_RAG_PROMPT.format(
+            formatting_instructions=fmt_instructions,
+            context_blocks=context_str,
+        )
 
         prompt = question
         if history:
@@ -151,8 +171,9 @@ class RAGService:
             try:
                 model = genai.GenerativeModel(model_name=m_name)
                 response = _with_retry(model.generate_content, full_prompt)
-                answer_text = response.text if response and hasattr(response, "text") else "No answer generated."
-                return ChatResponse(answer=answer_text, citations=citations)
+                raw_answer = response.text if response and hasattr(response, "text") else "No answer generated."
+                clean_answer = clean_markdown_output(raw_answer)
+                return ChatResponse(answer=clean_answer, citations=citations)
             except Exception as e:
                 last_error = e
                 logger.warning(f"Chat model {m_name} failed: {e}. Trying next chat model...")
@@ -164,6 +185,7 @@ class RAGService:
             user_msg = f"I encountered an error generating the answer: {err_msg}"
 
         return ChatResponse(answer=user_msg, citations=citations)
+
 
     def answer_question_for_user(
         self,
@@ -211,8 +233,13 @@ class RAGService:
             return ChatResponse(answer=answer, citations=[])
 
         # 3. Build context from paper title+abstract
+        intent = detect_question_intent(question)
+        fmt_instructions = get_intent_formatting_instructions(intent)
         context_str = self._format_context_from_papers(paper_rows)
-        system_instruction = SYSTEM_RAG_PROMPT.format(context_blocks=context_str)
+        system_instruction = SYSTEM_RAG_PROMPT.format(
+            formatting_instructions=fmt_instructions,
+            context_blocks=context_str,
+        )
 
         # 4. Build prompt with history
         prompt = question
@@ -228,7 +255,8 @@ class RAGService:
             try:
                 model = genai.GenerativeModel(model_name=m_name)
                 response = _with_retry(model.generate_content, full_prompt)
-                answer_text = response.text if response and hasattr(response, "text") else "No answer generated."
+                raw_text = response.text if response and hasattr(response, "text") else "No answer generated."
+                clean_answer = clean_markdown_output(raw_text)
                 # Build citations list for compatibility (we can reuse paper_matches as citations)
                 citations = [
                     {
@@ -239,7 +267,7 @@ class RAGService:
                     }
                     for m in paper_matches
                 ]
-                return ChatResponse(answer=answer_text, citations=citations)  # type: ignore
+                return ChatResponse(answer=clean_answer, citations=citations)  # type: ignore
             except Exception as e:
                 last_error = e
                 logger.warning(f"Chat model {m_name} failed: {e}. Trying next chat model...")
@@ -264,8 +292,13 @@ class RAGService:
                 paper_id=paper_id,
                 top_k=4,
             )
+            intent = detect_question_intent(question)
+            fmt_instructions = get_intent_formatting_instructions(intent)
             context_str = self._format_context(citations)
-            system_instruction = SYSTEM_RAG_PROMPT.format(context_blocks=context_str)
+            system_instruction = SYSTEM_RAG_PROMPT.format(
+                formatting_instructions=fmt_instructions,
+                context_blocks=context_str,
+            )
         except Exception as e:
             logger.error(f"Retrieval error in stream: {e}")
             err_payload = json.dumps({"error": f"Retrieval failed: {str(e)}"})
@@ -296,6 +329,7 @@ class RAGService:
                             stream_started = True
                             payload = json.dumps({"text": text})
                             yield f"data: {payload}\n\n"
+
                     except Exception as chunk_err:
                         logger.warning(f"Skipping unreadable stream chunk: {chunk_err}")
                 if stream_started:
@@ -303,6 +337,11 @@ class RAGService:
             except Exception as e:
                 last_error = e
                 logger.warning(f"Streaming chat model {m_name} failed: {e}")
+                if stream_started:
+                    # Do not attempt secondary models if streaming has already started to client
+                    err_payload = json.dumps({"error": f"Stream interrupted: {str(e)}"})
+                    yield f"data: {err_payload}\n\n"
+                    return
 
         if not stream_started and last_error:
             err_msg = str(last_error)

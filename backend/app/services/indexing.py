@@ -77,16 +77,17 @@ class IndexingService:
             )
 
         for chunk, vector in zip(chunks, vectors):
-            db_records.append(
-                {
-                    "paper_id": paper_id,
-                    "chunk_index": chunk.chunk_index,
-                    "section_title": chunk.section_title,
-                    "content": chunk.content,
-                    "embedding": vector,
-                    "word_count": chunk.word_count,
-                }
-            )
+            rec = {
+                "paper_id": paper_id,
+                "chunk_index": chunk.chunk_index,
+                "section_title": chunk.section_title,
+                "content": chunk.content,
+                "embedding": vector,
+                "word_count": chunk.word_count,
+            }
+            if chunk.page_number is not None:
+                rec["page_number"] = chunk.page_number
+            db_records.append(rec)
             chunk_infos.append(
                 ChunkInfo(
                     chunk_index=chunk.chunk_index,
@@ -153,3 +154,78 @@ class IndexingService:
                 status="error",
                 message=err_msg,
             )
+
+    def index_pdf_pages(
+        self,
+        paper_id: str,
+        pages_data: list,
+        document_id: Optional[str] = None,
+    ) -> IndexPaperResponse:
+        """Index page-extracted PDF text with page_number and optional document_id."""
+        client = get_supabase_client()
+        chunks = self.chunker.chunk_pages(paper_id=paper_id, pages_data=pages_data)
+
+        if not chunks:
+            return IndexPaperResponse(
+                paper_id=paper_id,
+                chunks_created=0,
+                chunks=[],
+                status="warning",
+                message="No content available to chunk from PDF pages.",
+            )
+
+        chunk_infos = []
+        db_records = []
+        vectors = self.embedding_service.embed_batch([chunk.content for chunk in chunks])
+
+        for chunk, vector in zip(chunks, vectors):
+            rec = {
+                "paper_id": paper_id,
+                "chunk_index": chunk.chunk_index,
+                "section_title": chunk.section_title,
+                "content": chunk.content,
+                "embedding": vector,
+                "word_count": chunk.word_count,
+            }
+            if chunk.page_number is not None:
+                rec["page_number"] = chunk.page_number
+            if document_id:
+                rec["document_id"] = document_id
+            db_records.append(rec)
+            chunk_infos.append(
+                ChunkInfo(
+                    chunk_index=chunk.chunk_index,
+                    section_title=chunk.section_title,
+                    word_count=chunk.word_count,
+                )
+            )
+
+        if client:
+            client.table("paper_chunks").upsert(
+                db_records,
+                on_conflict="paper_id,chunk_index",
+            ).execute()
+
+            # Store holistic paper embedding from combined page text
+            full_pdf_text = "\n".join(p.get("text", "") for p in pages_data)
+            if full_pdf_text:
+                try:
+                    paper_embedding = self.embedding_service.embed_text(full_pdf_text[:10000])
+                    client.table("paper_embeddings").upsert(
+                        {"paper_id": paper_id, "embedding": paper_embedding},
+                        on_conflict="paper_id",
+                    ).execute()
+                except Exception as e:
+                    logger.error(f"Failed to generate paper-level embedding: {e}")
+
+            now_iso = datetime.now(timezone.utc).isoformat()
+            client.table("papers").update({"indexed_at": now_iso, "full_text": full_pdf_text[:50000]}).eq("id", paper_id).execute()
+
+        return IndexPaperResponse(
+            paper_id=paper_id,
+            chunks_created=len(chunks),
+            chunks=chunk_infos,
+            status="success",
+            message=f"Indexed {len(chunks)} PDF page chunks for paper {paper_id}.",
+        )
+
