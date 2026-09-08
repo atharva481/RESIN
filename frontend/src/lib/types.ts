@@ -10,6 +10,7 @@ export interface Paper {
   abstract: string | null;
   citation_count: number;
   open_access_url: string | null;
+  is_open_access?: boolean;
   semantic_scholar_id: string | null;
   arxiv_id: string | null;
   updated_at?: string;
@@ -90,4 +91,20 @@ export interface RagIndexResponse {
   chunks_created: number;
   status: "success" | "warning" | "error";
   message: string;
+}
+
+export interface TriageItem {
+  id: string;
+  source: string;
+  title: string;
+  url: string;
+  reason: string;
+}
+
+export interface DailyTriage {
+  id: string;
+  user_id: string;
+  triage_date: string;
+  items: TriageItem[];
+  created_at: string;
 }

@@ -24,19 +24,22 @@ def chat_endpoint(
 ):
     """Synchronous single-paper RAG Q&A with Redis response caching."""
     if payload.paper_id:
-        cached = cache_service.get_cached_response(payload.paper_id, payload.message)
+        from app.services.paper_resolution import resolve_paper_record
+        canonical_id, _ = resolve_paper_record(payload.paper_id)
+
+        cached = cache_service.get_cached_response(canonical_id, payload.message)
         if cached:
             return ChatResponse(**cached)
 
         response = rag_service.answer_question(
-            paper_id=payload.paper_id,
+            paper_id=canonical_id,
             question=payload.message,
             history=payload.history,
         )
 
         save_chat_turn(user_id, None, "user", payload.message)
         save_chat_turn(user_id, None, "assistant", response.answer)
-        cache_service.set_cached_response(payload.paper_id, payload.message, response.model_dump())
+        cache_service.set_cached_response(canonical_id, payload.message, response.model_dump())
         return response
 
     # If paper_id is omitted, delegate to ResearchAgent
@@ -58,13 +61,21 @@ def chat_stream_endpoint(
 ):
     """Server-Sent Events streaming RAG & Agent endpoint."""
     if payload.paper_id:
+        from app.services.paper_resolution import resolve_paper_record
+        canonical_id, _ = resolve_paper_record(payload.paper_id)
+
         return StreamingResponse(
             rag_service.stream_answer(
-                paper_id=payload.paper_id,
+                paper_id=canonical_id,
                 question=payload.message,
                 history=payload.history,
             ),
             media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     # Stream agent execution events for multi-paper / library research

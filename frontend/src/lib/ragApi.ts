@@ -12,20 +12,74 @@ async function getAuthHeader(): Promise<HeadersInit> {
   };
 }
 
-export async function indexPaper(paperId: string, fullText?: string): Promise<RagIndexResponse> {
+export interface IndexPaperOptions {
+  fullText?: string;
+  force?: boolean;
+  title?: string;
+  doi?: string | null;
+  arxivId?: string | null;
+  openAccessUrl?: string | null;
+  abstract?: string | null;
+}
+
+export async function indexPaper(
+  paperId: string,
+  optionsOrFullText?: string | IndexPaperOptions,
+  force = false
+): Promise<RagIndexResponse> {
   const headers = await getAuthHeader();
+
+  let bodyPayload: Record<string, any> = {
+    paper_id: paperId,
+    force,
+  };
+
+  if (typeof optionsOrFullText === "string") {
+    bodyPayload.full_text = optionsOrFullText;
+  } else if (optionsOrFullText && typeof optionsOrFullText === "object") {
+    bodyPayload = {
+      paper_id: paperId,
+      full_text: optionsOrFullText.fullText,
+      force: optionsOrFullText.force ?? force,
+      title: optionsOrFullText.title,
+      doi: optionsOrFullText.doi ?? undefined,
+      arxiv_id: optionsOrFullText.arxivId ?? undefined,
+      open_access_url: optionsOrFullText.openAccessUrl ?? undefined,
+      abstract: optionsOrFullText.abstract ?? undefined,
+    };
+  }
+
   const response = await fetch(`${BACKEND_URL}/api/papers/${paperId}/index`, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      paper_id: paperId,
-      full_text: fullText,
-    }),
+    body: JSON.stringify(bodyPayload),
   });
 
   if (!response.ok) {
     const errorText = await response.text();
     throw new Error(`Failed to index paper: ${errorText}`);
+  }
+
+  return response.json();
+}
+
+export async function uploadPaperPdf(paperId: string, file: File): Promise<RagIndexResponse> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const response = await fetch(`${BACKEND_URL}/api/papers/${paperId}/upload-pdf`, {
+    method: "POST",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to upload and index PDF: ${errorText}`);
   }
 
   return response.json();

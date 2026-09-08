@@ -11,8 +11,8 @@ class Settings(BaseSettings):
     
     redis_url: str = "redis://localhost:6379"
     frontend_url: str = "http://localhost:5173"
-    gemini_embedding_model: str = Field("models/embedding-001", validation_alias="VITE_GEMINI_EMBEDDING_MODEL")
-    gemini_chat_model: str = Field("models/gemini-flash-latest", validation_alias="VITE_GEMINI_CHAT_MODEL")
+    gemini_embedding_model: str = Field("models/gemini-embedding-001", validation_alias="VITE_GEMINI_EMBEDDING_MODEL")
+    gemini_chat_model: str = Field("models/gemini-3.5-flash-lite", validation_alias="VITE_GEMINI_CHAT_MODEL")
     chunk_size: int = 600
     overlap_size: int = 100
     jwt_secret: str = ""

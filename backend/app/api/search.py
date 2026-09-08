@@ -37,6 +37,10 @@ def reconstruct_abstract(inverted_index: Optional[dict]) -> str:
     return " ".join(w[1] for w in word_pos)
 
 
+import xml.etree.ElementTree as ET
+from app.services.open_access import extract_arxiv_id
+
+
 def convert_openalex_item(item: dict) -> dict:
     """Transform OpenAlex work entity to Semantic Scholar SSPaper schema."""
     raw_id = item.get("id", "")
@@ -49,7 +53,18 @@ def convert_openalex_item(item: dict) -> dict:
     ids = item.get("ids") or {}
     if "arxiv" in ids:
         arxiv_raw = str(ids["arxiv"])
-        arxiv_id = arxiv_raw.split("/")[-1].replace("arXiv:", "")
+        arxiv_id = arxiv_raw.split("/")[-1].replace("arXiv:", "").strip()
+
+    oa_info = item.get("open_access") or {}
+    oa_url = oa_info.get("oa_url") if oa_info.get("is_oa") else None
+
+    # Discover arXiv ID from DOI or OA URL if missing from ids
+    if not arxiv_id:
+        arxiv_id = extract_arxiv_id(doi) or extract_arxiv_id(oa_url)
+
+    # If arXiv ID is known, prioritize the direct arXiv PDF link
+    if arxiv_id:
+        oa_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
 
     authors = []
     for auth in item.get("authorships") or []:
@@ -57,9 +72,13 @@ def convert_openalex_item(item: dict) -> dict:
         if author_name:
             authors.append({"name": author_name})
 
-    oa_info = item.get("open_access") or {}
-    oa_url = oa_info.get("oa_url") if oa_info.get("is_oa") else None
     abstract = reconstruct_abstract(item.get("abstract_inverted_index"))
+
+    is_oa = bool(
+        oa_info.get("is_oa")
+        or arxiv_id
+        or (oa_url and oa_url.lower().endswith(".pdf"))
+    )
 
     return {
         "paperId": work_id,
@@ -73,7 +92,59 @@ def convert_openalex_item(item: dict) -> dict:
         "authors": authors,
         "citationCount": item.get("cited_by_count", 0),
         "openAccessPdf": {"url": oa_url} if oa_url else None,
+        "isOpenAccess": is_oa,
     }
+
+
+async def fetch_arxiv_paper(arxiv_id: str) -> Optional[dict]:
+    """Fetch structured paper metadata directly from arXiv Export API."""
+    url = f"https://export.arxiv.org/api/query?id_list={arxiv_id}"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, timeout=10.0)
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.text)
+                entry = root.find("{http://www.w3.org/2005/Atom}entry")
+                if entry is not None:
+                    title_elem = entry.find("{http://www.w3.org/2005/Atom}title")
+                    summary_elem = entry.find("{http://www.w3.org/2005/Atom}summary")
+                    published_elem = entry.find("{http://www.w3.org/2005/Atom}published")
+
+                    title = " ".join(title_elem.text.split()) if title_elem is not None and title_elem.text else "Untitled Paper"
+                    abstract = " ".join(summary_elem.text.split()) if summary_elem is not None and summary_elem.text else None
+                    year = None
+                    if published_elem is not None and published_elem.text:
+                        try:
+                            year = int(published_elem.text[:4])
+                        except Exception:
+                            pass
+
+                    authors = []
+                    for auth_elem in entry.findall("{http://www.w3.org/2005/Atom}author"):
+                        name_elem = auth_elem.find("{http://www.w3.org/2005/Atom}name")
+                        if name_elem is not None and name_elem.text:
+                            authors.append({"name": name_elem.text.strip()})
+
+                    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+                    doi = f"10.48550/arXiv.{arxiv_id}"
+
+                    return {
+                        "paperId": f"arxiv_{arxiv_id}",
+                        "externalIds": {
+                            "DOI": doi,
+                            "ArXiv": arxiv_id,
+                        },
+                        "title": title,
+                        "abstract": abstract,
+                        "year": year,
+                        "authors": authors,
+                        "citationCount": 0,
+                        "openAccessPdf": {"url": pdf_url},
+                        "isOpenAccess": True,
+                    }
+    except Exception as e:
+        logger.warning(f"Direct arXiv query failed for {arxiv_id}: {e}")
+    return None
 
 
 async def fetch_openalex_search(query: str, limit: int = 20) -> dict:
@@ -108,17 +179,28 @@ async def fetch_openalex_paper(paper_id: str) -> dict:
 
 @router.get("/search")
 async def search_papers(query: str = Query(..., min_length=1), limit: int = 20):
-    """Proxy paper search to Semantic Scholar API with automatic OpenAlex fallback."""
-    cache_key = f"search:{query.lower().strip()}:{limit}"
+    """Proxy paper search to Semantic Scholar API with automatic arXiv direct lookup and OpenAlex fallback."""
+    clean_q = query.strip()
+    cache_key = f"search:{clean_q.lower()}:{limit}"
     now = time.time()
 
     if cache_key in _cache and (now - _cache[cache_key]["ts"] < CACHE_TTL_SECONDS):
-        logger.info(f"Returning cached search results for: '{query}'")
+        logger.info(f"Returning cached search results for: '{clean_q}'")
         return _cache[cache_key]["data"]
+
+    # 0. Check for arXiv ID or arXiv URL directly (e.g. 1201.0490 or https://arxiv.org/abs/1201.0490)
+    aid = extract_arxiv_id(clean_q)
+    if aid:
+        logger.info(f"Detected arXiv query '{clean_q}', fetching directly for ID: {aid}")
+        arxiv_item = await fetch_arxiv_paper(aid)
+        if arxiv_item:
+            res_data = {"total": 1, "offset": 0, "data": [arxiv_item]}
+            _cache[cache_key] = {"data": res_data, "ts": now}
+            return res_data
 
     url = f"{SS_BASE_URL}/paper/search"
     params = {
-        "query": query,
+        "query": clean_q,
         "limit": limit,
         "fields": FIELDS,
     }
@@ -144,7 +226,7 @@ async def search_papers(query: str = Query(..., min_length=1), limit: int = 20):
 
     # OpenAlex Fallback
     try:
-        data = await fetch_openalex_search(query, limit)
+        data = await fetch_openalex_search(clean_q, limit)
         _cache[cache_key] = {"data": data, "ts": now}
         return data
     except Exception as e:
@@ -156,12 +238,21 @@ async def search_papers(query: str = Query(..., min_length=1), limit: int = 20):
 
 @router.get("/{paper_id}")
 async def get_paper_details(paper_id: str):
-    """Proxy single paper details request to Semantic Scholar with OpenAlex fallback."""
+    """Proxy single paper details request to Semantic Scholar with arXiv and OpenAlex fallback."""
     cache_key = f"paper:{paper_id}"
     now = time.time()
 
     if cache_key in _cache and (now - _cache[cache_key]["ts"] < CACHE_TTL_SECONDS):
         return _cache[cache_key]["data"]
+
+    # 0. Check if arXiv ID or arXiv URL
+    aid = extract_arxiv_id(paper_id)
+    if aid or paper_id.startswith("arxiv_"):
+        clean_aid = aid or paper_id.replace("arxiv_", "")
+        paper = await fetch_arxiv_paper(clean_aid)
+        if paper:
+            _cache[cache_key] = {"data": paper, "ts": now}
+            return paper
 
     if paper_id.startswith("W"):
         # Direct OpenAlex ID

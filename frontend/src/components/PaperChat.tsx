@@ -1,9 +1,9 @@
 import ReactMarkdown from "react-markdown";
 import { useState, useEffect, useRef, useCallback } from "react";
-import { MessageSquare, Send, Loader2, Sparkles, BookOpen, Database } from "lucide-react";
+import { MessageSquare, Send, Loader2, Sparkles, BookOpen, Database, Upload, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { askPaperRAG, indexPaper, streamPaperRAG } from "@/lib/ragApi";
+import { askPaperRAG, indexPaper, streamPaperRAG, uploadPaperPdf } from "@/lib/ragApi";
 import type { Paper, RagChatMessage } from "@/lib/types";
 import { toast } from "sonner";
 
@@ -16,9 +16,18 @@ export function PaperChat({ paper }: PaperChatProps) {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [indexing, setIndexing] = useState(false);
-  const [isIndexed, setIsIndexed] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [indexNotice, setIndexNotice] = useState<string | null>(null);
+  const [isIndexed, setIsIndexed] = useState(Boolean((paper as any).indexed_at));
   const [streaming, setStreaming] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if ((paper as any).indexed_at) {
+      setIsIndexed(true);
+    }
+  }, [paper]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -28,12 +37,43 @@ export function PaperChat({ paper }: PaperChatProps) {
     scrollToBottom();
   }, [messages, loading]);
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const res = await uploadPaperPdf(paper.id, file);
+      setIsIndexed(true);
+      setIndexNotice(null);
+      toast.success(res.message || "Full PDF successfully uploaded & indexed!");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to upload PDF.");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const handleIndexPaper = async () => {
     setIndexing(true);
     try {
-      const res = await indexPaper(paper.id, paper.abstract || undefined);
+      // Force re-index if button is clicked explicitly
+      const res = await indexPaper(paper.id, {
+        abstract: paper.abstract || undefined,
+        force: true,
+        title: paper.title,
+        doi: paper.doi,
+        arxivId: paper.arxiv_id,
+        openAccessUrl: paper.open_access_url,
+      });
       setIsIndexed(true);
-      toast.success(res.message || "Paper indexed successfully for AI Chat.");
+      if (res.status === "warning" || res.chunks_created <= 1) {
+        setIndexNotice(res.message);
+        toast.warning(res.message);
+      } else {
+        setIndexNotice(null);
+        toast.success(res.message || "Paper indexed successfully for AI Chat.");
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to index paper for RAG.");
     } finally {
@@ -56,9 +96,16 @@ export function PaperChat({ paper }: PaperChatProps) {
     setStreaming(true);
 
     try {
-      // Auto-index if not already done
+      // Auto-index if not already done (fast check via backend; will not re-download if chunks exist)
       if (!isIndexed) {
-        await indexPaper(paper.id, paper.abstract || undefined);
+        await indexPaper(paper.id, {
+          abstract: paper.abstract || undefined,
+          force: false,
+          title: paper.title,
+          doi: paper.doi,
+          arxivId: paper.arxiv_id,
+          openAccessUrl: paper.open_access_url,
+        });
         setIsIndexed(true);
       }
 
@@ -115,12 +162,35 @@ export function PaperChat({ paper }: PaperChatProps) {
             <span className="text-[10px] text-primary animate-pulse">Streaming</span>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          <input
+            type="file"
+            ref={fileInputRef}
+            accept="application/pdf"
+            className="hidden"
+            onChange={handleFileUpload}
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading || indexing}
+            className="text-xs h-7 gap-1 text-primary border-primary/30 hover:bg-primary/10"
+            title="Upload full PDF for paywalled or custom papers"
+          >
+            {uploading ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Upload className="h-3 w-3" />
+            )}
+            Upload PDF
+          </Button>
+
           <Button
             size="sm"
             variant="ghost"
             onClick={handleIndexPaper}
-            disabled={indexing}
+            disabled={indexing || uploading}
             className="text-xs h-7 gap-1"
           >
             {indexing ? (
@@ -132,6 +202,24 @@ export function PaperChat({ paper }: PaperChatProps) {
           </Button>
         </div>
       </div>
+
+      {/* Paywall / Abstract Fallback Notice */}
+      {indexNotice && (
+        <div className="bg-amber-500/10 border-b border-amber-500/20 px-3.5 py-2 text-xs text-amber-600 dark:text-amber-400 flex items-center justify-between gap-2 animate-fade-in">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+            <span className="truncate">{indexNotice}</span>
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => fileInputRef.current?.click()}
+            className="h-5 text-[11px] px-2 text-primary font-semibold underline underline-offset-2 shrink-0 hover:bg-transparent"
+          >
+            Upload PDF
+          </Button>
+        </div>
+      )}
 
       {/* Messages Feed */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4 text-sm">

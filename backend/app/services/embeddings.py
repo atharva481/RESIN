@@ -131,12 +131,24 @@ class EmbeddingService:
         """Generate 768-dim embedding vector for a search query."""
         return self._call_embed(query, task_type="retrieval_query")
 
-    def embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings for a list of text chunks using the batch API."""
+    def embed_batch(self, texts: List[str], batch_size: int = 5) -> List[List[float]]:
+        """Generate embeddings for a list of text chunks in manageable batches to avoid payload/stream reset issues."""
         if not texts:
             return []
-        try:
-            return self._call_embed(texts, task_type="retrieval_document")
-        except Exception as e:
-            logger.error(f"Failed to generate batch embeddings via Gemini: {e}")
-            raise
+        all_embeddings: List[List[float]] = []
+        for i in range(0, len(texts), batch_size):
+            chunk_batch = texts[i : i + batch_size]
+            try:
+                res = self._call_embed(chunk_batch, task_type="retrieval_document")
+                if isinstance(res, list) and res and isinstance(res[0], list):
+                    all_embeddings.extend(res)
+                elif isinstance(res, list) and res and isinstance(res[0], (int, float)):
+                    all_embeddings.append(res)
+                else:
+                    raise ValueError(f"Unexpected embedding format: {type(res)}")
+            except Exception as e:
+                logger.warning(f"Batch embedding failed for batch starting at {i}: {e}. Retrying item-by-item...")
+                for text in chunk_batch:
+                    vec = self.embed_text(text)
+                    all_embeddings.append(vec)
+        return all_embeddings

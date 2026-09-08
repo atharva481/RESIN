@@ -20,7 +20,7 @@ export const supabase: SupabaseClient | null = isSupabaseConfigured
   ? createClient(url!, key!)
   : null;
 
-import type { Folder, Paper, PaperSummary, UserPaper } from "./types";
+import type { Folder, Paper, PaperSummary, UserPaper, DailyTriage } from "./types";
 
 /**
  * Ensures a user record exists in the public.users table matching the auth user.
@@ -185,4 +185,24 @@ export async function updateReadingStatus(userPaperId: string, status: "unread" 
     .update({ status })
     .eq("id", userPaperId);
   if (error) throw error;
+}
+
+export async function getDailyTriage(): Promise<DailyTriage | null> {
+  if (!supabase) return null;
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return null;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const { data, error } = await supabase
+    .from("daily_triage")
+    .select("*")
+    .eq("user_id", user.id)
+    .eq("triage_date", today)
+    .maybeSingle();
+
+  if (error) {
+    console.error("Failed to fetch daily triage:", error);
+    return null;
+  }
+  return data as DailyTriage | null;
 }

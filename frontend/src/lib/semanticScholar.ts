@@ -30,20 +30,30 @@ interface SSPaper {
   authors: SSAuthor[];
   citationCount: number;
   openAccessPdf: { url: string } | null;
+  isOpenAccess?: boolean;
 }
 
-const toPaper = (p: SSPaper): Paper => ({
-  id: p.paperId, // temporary id used for UI; persisted papers will get real uuid
-  doi: p.externalIds?.DOI ?? null,
-  title: p.title,
-  authors: (p.authors ?? []).map((a) => a.name),
-  year: p.year ?? null,
-  abstract: p.abstract,
-  citation_count: p.citationCount ?? 0,
-  open_access_url: p.openAccessPdf?.url ?? null,
-  semantic_scholar_id: p.paperId,
-  arxiv_id: p.externalIds?.ArXiv ?? null,
-});
+const toPaper = (p: SSPaper): Paper => {
+  const isOa = Boolean(
+    p.isOpenAccess ||
+    p.externalIds?.ArXiv ||
+    (p.openAccessPdf?.url && p.openAccessPdf.url.trim().length > 0)
+  );
+
+  return {
+    id: p.paperId, // temporary id used for UI; persisted papers will get real uuid
+    doi: p.externalIds?.DOI ?? null,
+    title: p.title,
+    authors: (p.authors ?? []).map((a) => a.name),
+    year: p.year ?? null,
+    abstract: p.abstract,
+    citation_count: p.citationCount ?? 0,
+    open_access_url: p.openAccessPdf?.url ?? null,
+    is_open_access: isOa,
+    semantic_scholar_id: p.paperId,
+    arxiv_id: p.externalIds?.ArXiv ?? null,
+  };
+};
 
 export async function searchPapers(query: string, limit = 20): Promise<Paper[]> {
   if (!query.trim()) return [];

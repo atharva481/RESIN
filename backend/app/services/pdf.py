@@ -9,10 +9,43 @@ from urllib.parse import urlparse
 import httpx
 import pypdf
 
+from dataclasses import dataclass
+from enum import Enum
+
 logger = logging.getLogger(__name__)
 
-MAX_PDF_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB limit
+MAX_PDF_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB limit
 DOWNLOAD_TIMEOUT_SECONDS = 30.0
+
+
+class DownloadFailureReason(str, Enum):
+    SUCCESS = "SUCCESS"
+    NO_PDF_FOUND = "NO_PDF_FOUND"
+    LANDING_PAGE_ONLY = "LANDING_PAGE_ONLY"
+    LOGIN_REQUIRED = "LOGIN_REQUIRED"
+    PAYWALL_DETECTED = "PAYWALL_DETECTED"
+    BOT_PROTECTION = "BOT_PROTECTION"
+    RATE_LIMITED = "RATE_LIMITED"
+    SERVER_ERROR = "SERVER_ERROR"
+    NOT_FOUND = "NOT_FOUND"
+    INVALID_PDF = "INVALID_PDF"
+    PDF_TOO_LARGE = "PDF_TOO_LARGE"
+    NETWORK_ERROR = "NETWORK_ERROR"
+
+
+@dataclass
+class PDFDownloadResult:
+    success: bool
+    pdf_bytes: Optional[bytes] = None
+    sha256: Optional[str] = None
+    url: str = ""
+    final_url: str = ""
+    status_code: int = 0
+    content_type: str = ""
+    size: int = 0
+    failure_reason: DownloadFailureReason = DownloadFailureReason.NO_PDF_FOUND
+    error_message: Optional[str] = None
+
 
 PRIVATE_IP_NETWORKS = [
     ipaddress.ip_network("127.0.0.0/8"),
@@ -80,46 +113,251 @@ def calculate_sha256(content_bytes: bytes) -> str:
 class PDFService:
     """Service for securely downloading, validating, and extracting text/pages from PDFs."""
 
-    def download_pdf(self, pdf_url: str) -> Tuple[bytes, str]:
+    def detailed_download(self, pdf_url: str) -> PDFDownloadResult:
         """
-        Download PDF from validated URL with size checking and SSRF protection.
-        Returns tuple of (pdf_bytes, sha256_checksum).
+        Download PDF with full diagnostics, failure taxonomy, content-type and magic byte inspection.
+        Returns a rich PDFDownloadResult.
         """
-        safe_url = validate_url_security(pdf_url)
+        try:
+            safe_url = validate_url_security(pdf_url)
+        except SSRFValidationError as e:
+            return PDFDownloadResult(
+                success=False,
+                url=pdf_url,
+                failure_reason=DownloadFailureReason.NETWORK_ERROR,
+                error_message=f"Security check failed: {e}",
+            )
 
         headers = {
-            "User-Agent": "ResinAcademicBot/1.0 (Research Assistant; mailto:resin@example.com)"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/pdf,application/xhtml+xml,text/html;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         }
 
         try:
             with httpx.Client(follow_redirects=True, timeout=DOWNLOAD_TIMEOUT_SECONDS) as client:
-                # Initial HEAD check or streaming GET to validate content-length
                 resp = client.get(safe_url, headers=headers)
+                final_url = str(resp.url)
+                status = resp.status_code
+                content_type = resp.headers.get("content-type", "").lower()
+                content = resp.content
+                size = len(content)
 
-                # Validate final redirected URL
-                validate_url_security(str(resp.url))
+                # Validate redirected URL against SSRF
+                try:
+                    validate_url_security(final_url)
+                except SSRFValidationError as e:
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        failure_reason=DownloadFailureReason.NETWORK_ERROR,
+                        error_message=f"Redirect violated security: {e}",
+                    )
 
-                if resp.status_code != 200:
-                    raise PDFExtractionError(f"HTTP error {resp.status_code} while fetching PDF from {pdf_url}")
+                # Diagnose HTTP error codes
+                if status == 401 or "/login" in final_url.lower() or "signin" in final_url.lower():
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.LOGIN_REQUIRED,
+                        error_message="Authentication / institutional login required.",
+                    )
 
-                pdf_bytes = resp.content
-                if len(pdf_bytes) > MAX_PDF_SIZE_BYTES:
-                    raise PDFExtractionError(f"PDF file size ({len(pdf_bytes)} bytes) exceeds max limit of 50MB.")
+                if status == 403:
+                    html_snippet = resp.text[:3000].lower() if resp.text else ""
+                    if any(bot in html_snippet for bot in ["cloudflare", "turnstile", "recaptcha", "just a moment", "bot", "challenge"]):
+                        return PDFDownloadResult(
+                            success=False,
+                            url=pdf_url,
+                            final_url=final_url,
+                            status_code=status,
+                            content_type=content_type,
+                            size=size,
+                            failure_reason=DownloadFailureReason.BOT_PROTECTION,
+                            error_message="Publisher server blocked automated download via bot challenge.",
+                        )
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.PAYWALL_DETECTED,
+                        error_message="Access forbidden (403). Subscription or purchase required.",
+                    )
 
-                # Validate magic bytes for PDF (%PDF-)
-                if not pdf_bytes.startswith(b"%PDF-"):
-                    # Check first 1024 bytes in case of leading whitespace
-                    if b"%PDF-" not in pdf_bytes[:1024]:
-                        raise PDFExtractionError("Downloaded content does not have a valid PDF header.")
+                if status == 429:
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.RATE_LIMITED,
+                        error_message="Publisher rate limit exceeded (429).",
+                    )
 
-                sha256 = calculate_sha256(pdf_bytes)
-                return pdf_bytes, sha256
+                if status == 404:
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.NOT_FOUND,
+                        error_message="File or page not found (404).",
+                    )
 
-        except (SSRFValidationError, PDFExtractionError):
-            raise
+                if status >= 500:
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.SERVER_ERROR,
+                        error_message=f"Publisher server error ({status}).",
+                    )
+
+                if status != 200:
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.NETWORK_ERROR,
+                        error_message=f"HTTP {status} returned.",
+                    )
+
+                # Check max size (100MB)
+                if size > MAX_PDF_SIZE_BYTES:
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.PDF_TOO_LARGE,
+                        error_message=f"PDF file size ({size / (1024*1024):.1f} MB) exceeds 100MB limit.",
+                    )
+
+                # Magic byte verification (%PDF-)
+                has_magic_bytes = content.startswith(b"%PDF-") or (b"%PDF-" in content[:1024])
+
+                if has_magic_bytes:
+                    sha256 = calculate_sha256(content)
+                    return PDFDownloadResult(
+                        success=True,
+                        pdf_bytes=content,
+                        sha256=sha256,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.SUCCESS,
+                    )
+
+                # Content does not have %PDF- header: inspect HTML body for diagnostics
+                html_text = ""
+                try:
+                    html_text = resp.text[:10000].lower()
+                except Exception:
+                    pass
+
+                # Check for paywall / login markers
+                paywall_signals = [
+                    "purchase article", "purchase pdf", "buy article", "subscribe",
+                    "institutional access", "access through your institution",
+                    "rent this article", "pay-per-view", "readcube checkout"
+                ]
+                if any(sig in html_text for sig in paywall_signals):
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.PAYWALL_DETECTED,
+                        error_message="Landing page indicates article purchase or subscription is required.",
+                    )
+
+                # Check for bot challenge
+                bot_signals = ["recaptcha", "cloudflare", "challenge-running", "turnstile", "cloudpmc-viewer-pow", "preparing to download"]
+                if any(sig in html_text for sig in bot_signals):
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.BOT_PROTECTION,
+                        error_message="Publisher presented an anti-bot challenge (reCAPTCHA / Proof-of-Work).",
+                    )
+
+                # HTML landing page
+                if "html" in content_type or html_text.startswith("<!doctype") or "<html" in html_text:
+                    return PDFDownloadResult(
+                        success=False,
+                        url=pdf_url,
+                        final_url=final_url,
+                        status_code=status,
+                        content_type=content_type,
+                        size=size,
+                        failure_reason=DownloadFailureReason.LANDING_PAGE_ONLY,
+                        error_message="URL returned an HTML landing page instead of a PDF.",
+                    )
+
+                return PDFDownloadResult(
+                    success=False,
+                    url=pdf_url,
+                    final_url=final_url,
+                    status_code=status,
+                    content_type=content_type,
+                    size=size,
+                    failure_reason=DownloadFailureReason.INVALID_PDF,
+                    error_message="Downloaded binary content did not contain a valid %PDF- header.",
+                )
+
+        except httpx.TimeoutException:
+            return PDFDownloadResult(
+                success=False,
+                url=pdf_url,
+                failure_reason=DownloadFailureReason.NETWORK_ERROR,
+                error_message="Connection timed out after 30 seconds.",
+            )
         except Exception as e:
-            logger.error(f"Error downloading PDF from {pdf_url}: {e}")
-            raise PDFExtractionError(f"Failed to download PDF: {str(e)}")
+            return PDFDownloadResult(
+                success=False,
+                url=pdf_url,
+                failure_reason=DownloadFailureReason.NETWORK_ERROR,
+                error_message=str(e),
+            )
+
+    def download_pdf(self, pdf_url: str) -> Tuple[bytes, str]:
+        """
+        Backward-compatible download helper. Returns (pdf_bytes, sha256_checksum)
+        or raises PDFExtractionError.
+        """
+        result = self.detailed_download(pdf_url)
+        if result.success and result.pdf_bytes and result.sha256:
+            return result.pdf_bytes, result.sha256
+        raise PDFExtractionError(result.error_message or f"PDF extraction failed ({result.failure_reason.value})")
 
     def extract_pages(self, pdf_bytes: bytes) -> List[Dict[str, Any]]:
         """

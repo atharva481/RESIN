@@ -4,6 +4,7 @@ import { searchPapers } from "@/lib/semanticScholar";
 import { PaperCard } from "@/components/PaperCard";
 import { PageHeader } from "@/components/PageHeader";
 import { ConfigBanner } from "@/components/ConfigBanner";
+import { DailyTriageSection } from "@/components/DailyTriageSection";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Search, Loader2, BookOpen, FileX } from "lucide-react";
@@ -30,7 +31,7 @@ export default function Papers() {
   });
 
   const filtered = (data ?? [])
-    .filter((p) => (openAccessOnly ? Boolean(p.open_access_url) : true))
+    .filter((p) => (openAccessOnly ? Boolean(p.is_open_access || p.open_access_url || p.arxiv_id) : true))
     .sort((a, b) => {
       if (sortBy === "citations") return (b.citation_count ?? 0) - (a.citation_count ?? 0);
       if (sortBy === "year") return (b.year ?? 0) - (a.year ?? 0);
@@ -45,6 +46,8 @@ export default function Papers() {
         description="Powered by Semantic Scholar. Every paper can be summarised by AI into Problem · Method · Findings · Limitations · Significance."
       />
       <ConfigBanner />
+
+      <DailyTriageSection />
 
       <form
         onSubmit={(e) => { e.preventDefault(); setSubmitted(query.trim()); }}

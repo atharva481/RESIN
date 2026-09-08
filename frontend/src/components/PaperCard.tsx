@@ -1,4 +1,4 @@
-import { Quote, Calendar, Users, ExternalLink, MessageSquare } from "lucide-react";
+import { Quote, Calendar, Users, ExternalLink, MessageSquare, Lock } from "lucide-react";
 import type { Paper } from "@/lib/types";
 import { SaveToFolder } from "@/components/SaveToFolder";
 import { AISummary } from "@/components/AISummary";
@@ -41,9 +41,19 @@ export function PaperCard({ paper, persistedId }: PaperCardProps) {
             <Quote className="h-3 w-3" />
             <span className="font-mono-tech">{paper.citation_count.toLocaleString()}</span> citations
           </span>
-          {paper.arxiv_id && (
-            <span className="font-mono-tech text-[10px] px-1.5 py-0.5 rounded bg-secondary border border-border">
+          {paper.arxiv_id ? (
+            <span className="font-mono-tech text-[10px] px-1.5 py-0.5 rounded bg-secondary border border-border inline-flex items-center gap-1">
               arXiv:{paper.arxiv_id}
+            </span>
+          ) : (paper.open_access_url || paper.is_open_access) ? (
+            <span className="font-mono-tech text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 inline-flex items-center gap-1 font-medium">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Open Access (Full PDF)
+            </span>
+          ) : (
+            <span className="font-mono-tech text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 inline-flex items-center gap-1 font-medium">
+              <Lock className="h-2.5 w-2.5" />
+              Paywalled (Upload PDF)
             </span>
           )}
         </div>

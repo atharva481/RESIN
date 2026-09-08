@@ -70,7 +70,7 @@ def _with_retry(fn, *args, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY, **k
     raise RuntimeError(f"Gemini API failed after {max_retries} attempts.")
 
 
-SYSTEM_RAG_PROMPT = """You are an expert scientific AI research assistant for the RESIN platform.
+SYSTEM_RAG_PROMPT = r"""You are an expert scientific AI research assistant for the RESIN platform.
 Answer the user's question accurately based strictly on the provided research paper evidence below.
 
 ANSWER FORMAT & READABILITY RULES:
@@ -126,10 +126,9 @@ class RAGService:
     def _get_chat_models(self) -> List[str]:
         raw = [
             self.model_name,
-            "models/gemini-flash-latest",
-            "models/gemini-3.6-flash",
+            "models/gemini-3.5-flash-lite",
             "models/gemini-3.5-flash",
-            "gemini-flash-latest",
+            "models/gemini-3.6-flash",
         ]
         unique = []
         for m in raw:

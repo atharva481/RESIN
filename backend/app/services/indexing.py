@@ -25,6 +25,8 @@ class IndexingService:
         paper_id: str,
         full_text: Optional[str] = None,
         sections: Optional[dict] = None,
+        title: Optional[str] = None,
+        abstract: Optional[str] = None,
     ) -> IndexPaperResponse:
         client = get_supabase_client()
 
@@ -35,18 +37,22 @@ class IndexingService:
                 res = client.table("papers").select("*").eq("id", paper_id).execute()
                 if res.data:
                     paper_data = res.data[0]
+                else:
+                    res2 = client.table("papers").select("*").eq("semantic_scholar_id", paper_id).execute()
+                    if res2.data:
+                        paper_data = res2.data[0]
             except Exception as e:
                 logger.warning(f"Could not fetch paper {paper_id} details from Supabase: {e}")
 
-        title = paper_data.get("title", "Untitled Paper")
-        abstract = paper_data.get("abstract", "")
+        final_title = title or paper_data.get("title") or "Untitled Paper"
+        final_abstract = abstract or paper_data.get("abstract") or ""
         db_full_text = paper_data.get("full_text") or full_text
 
         # 2. Chunk paper
         chunks = self.chunker.chunk_paper(
             paper_id=paper_id,
-            title=title,
-            abstract=abstract,
+            title=final_title,
+            abstract=final_abstract,
             full_text=db_full_text,
             sections=sections,
         )
@@ -201,16 +207,24 @@ class IndexingService:
             )
 
         if client:
-            client.table("paper_chunks").upsert(
-                db_records,
-                on_conflict="paper_id,chunk_index",
-            ).execute()
+            # Batch upsert into paper_chunks to prevent HTTP/2 StreamReset / payload limits
+            batch_size = 5
+            for i in range(0, len(db_records), batch_size):
+                batch = db_records[i : i + batch_size]
+                try:
+                    client.table("paper_chunks").upsert(
+                        batch,
+                        on_conflict="paper_id,chunk_index",
+                    ).execute()
+                except Exception as e:
+                    logger.error(f"Error upserting chunk batch {i//batch_size} for {paper_id}: {e}")
+                    raise
 
             # Store holistic paper embedding from combined page text
             full_pdf_text = "\n".join(p.get("text", "") for p in pages_data)
             if full_pdf_text:
                 try:
-                    paper_embedding = self.embedding_service.embed_text(full_pdf_text[:10000])
+                    paper_embedding = self.embedding_service.embed_text(full_pdf_text[:8000])
                     client.table("paper_embeddings").upsert(
                         {"paper_id": paper_id, "embedding": paper_embedding},
                         on_conflict="paper_id",
@@ -219,7 +233,7 @@ class IndexingService:
                     logger.error(f"Failed to generate paper-level embedding: {e}")
 
             now_iso = datetime.now(timezone.utc).isoformat()
-            client.table("papers").update({"indexed_at": now_iso, "full_text": full_pdf_text[:50000]}).eq("id", paper_id).execute()
+            client.table("papers").update({"indexed_at": now_iso, "full_text": full_pdf_text[:10000]}).eq("id", paper_id).execute()
 
         return IndexPaperResponse(
             paper_id=paper_id,
