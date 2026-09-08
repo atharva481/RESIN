@@ -1,3 +1,4 @@
+import ReactMarkdown from "react-markdown";
 import { useState, useEffect, useRef, useCallback } from "react";
 import { MessageSquare, Send, Loader2, Sparkles, BookOpen, Database } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -82,6 +83,8 @@ export function PaperChat({ paper }: PaperChatProps) {
           console.warn("Stream failed, falling back to non-streaming:", err);
           setStreaming(false);
           try {
+            // Clear out any partial streaming message before calling fallback
+            setMessages(newHistory);
             const response = await askPaperRAG(paper.id, userMessage, newHistory);
             setMessages([
               ...newHistory,
@@ -155,7 +158,15 @@ export function PaperChat({ paper }: PaperChatProps) {
                     : "bg-secondary/60 text-foreground border border-border"
                 }`}
               >
-                {msg.content}
+                {msg.role === "assistant" ? (
+                  <div className="prose dark:prose-invert max-w-none text-sm leading-relaxed space-y-2">
+                    <ReactMarkdown>
+                      {msg.content || ""}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  msg.content
+                )}
               </div>
 
               {/* Citations Badges */}
@@ -164,13 +175,16 @@ export function PaperChat({ paper }: PaperChatProps) {
                   {msg.citations.map((cite, idx) => (
                     <span
                       key={idx}
-                      title={cite.content_snippet}
+                      title={`${cite.paper_title || ''}\nSnippet: ${cite.content_snippet}`}
                       className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-accent/30 text-accent-foreground border border-border"
                     >
                       <BookOpen className="h-2.5 w-2.5" />
+                      {cite.paper_title ? `${cite.paper_title.slice(0, 20)}... | ` : ''}
+                      {cite.page_number ? `p. ${cite.page_number} | ` : ''}
                       {cite.section_title || `Chunk #${cite.chunk_index}`}
                     </span>
                   ))}
+
                 </div>
               )}
             </div>

@@ -109,11 +109,11 @@ export async function streamPaperRAG(
                   }
                   if (typeof parsed.text === "string") {
                     onChunk(parsed.text);
-                  } else {
-                    onChunk(raw);
+                  } else if (typeof parsed.answer === "string") {
+                    onChunk(parsed.answer);
                   }
                 } catch {
-                  onChunk(raw);
+                  // Ignore non-JSON or partial chunk buffers
                 }
               }
             }

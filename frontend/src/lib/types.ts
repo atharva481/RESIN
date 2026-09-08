@@ -62,10 +62,14 @@ export interface CitationEdge {
   weight: number;
 }
 
-// RAG Specific Types
 export interface RagCitation {
-  section_title?: string;
+  paper_id?: string;
+  paper_title?: string;
+  document_id?: string;
+  chunk_id?: string;
   chunk_index: number;
+  page_number?: number;
+  section_title?: string;
   content_snippet: string;
   similarity_score: number;
 }
