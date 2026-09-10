@@ -12,6 +12,7 @@ interface PaperChatProps {
 }
 
 export function PaperChat({ paper }: PaperChatProps) {
+  const [canonicalId, setCanonicalId] = useState<string>(paper.id);
   const [messages, setMessages] = useState<RagChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
@@ -42,7 +43,10 @@ export function PaperChat({ paper }: PaperChatProps) {
     if (!file) return;
     setUploading(true);
     try {
-      const res = await uploadPaperPdf(paper.id, file);
+      const res = await uploadPaperPdf(canonicalId || paper.id, file);
+      if (res.canonical_paper_id) {
+        setCanonicalId(res.canonical_paper_id);
+      }
       setIsIndexed(true);
       setIndexNotice(null);
       toast.success(res.message || "Full PDF successfully uploaded & indexed!");
@@ -66,6 +70,9 @@ export function PaperChat({ paper }: PaperChatProps) {
         arxivId: paper.arxiv_id,
         openAccessUrl: paper.open_access_url,
       });
+      if (res.canonical_paper_id) {
+        setCanonicalId(res.canonical_paper_id);
+      }
       setIsIndexed(true);
       if (res.status === "warning" || res.chunks_created <= 1) {
         setIndexNotice(res.message);
@@ -96,9 +103,11 @@ export function PaperChat({ paper }: PaperChatProps) {
     setStreaming(true);
 
     try {
+      let activeTargetId = canonicalId || paper.id;
+
       // Auto-index if not already done (fast check via backend; will not re-download if chunks exist)
       if (!isIndexed) {
-        await indexPaper(paper.id, {
+        const indexRes = await indexPaper(paper.id, {
           abstract: paper.abstract || undefined,
           force: false,
           title: paper.title,
@@ -106,11 +115,15 @@ export function PaperChat({ paper }: PaperChatProps) {
           arxivId: paper.arxiv_id,
           openAccessUrl: paper.open_access_url,
         });
+        if (indexRes.canonical_paper_id) {
+          activeTargetId = indexRes.canonical_paper_id;
+          setCanonicalId(indexRes.canonical_paper_id);
+        }
         setIsIndexed(true);
       }
 
       await streamPaperRAG(
-        paper.id,
+        activeTargetId,
         userMessage,
         newHistory,
         (chunk) => {
@@ -132,7 +145,13 @@ export function PaperChat({ paper }: PaperChatProps) {
           try {
             // Clear out any partial streaming message before calling fallback
             setMessages(newHistory);
-            const response = await askPaperRAG(paper.id, userMessage, newHistory);
+            const response = await askPaperRAG(
+              activeTargetId,
+              userMessage,
+              newHistory,
+              paper.doi,
+              paper.title,
+            );
             setMessages([
               ...newHistory,
               { role: "assistant", content: response.answer, citations: response.citations },
@@ -143,13 +162,15 @@ export function PaperChat({ paper }: PaperChatProps) {
             setLoading(false);
           }
         },
+        paper.doi,
+        paper.title,
       );
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to get answer from AI.");
       setStreaming(false);
       setLoading(false);
     }
-  }, [input, loading, isIndexed, messages, paper.id]);
+  }, [input, loading, isIndexed, messages, canonicalId, paper.id, paper.doi, paper.title]);
 
   return (
     <div className="flex flex-col h-[500px] border border-border rounded-xl bg-card overflow-hidden shadow-sm">

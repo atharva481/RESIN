@@ -1,84 +1,81 @@
-# RESIN: Project Details
+# RESIN: Project Overview & System Specification
 
-## Overview
-RESIN is a modern, serverless web application designed to help users discover, organize, and summarize academic research papers. It provides an intuitive interface for searching academic databases, securely saving papers into personalized folders, and leveraging AI to generate structured digests of complex scientific abstracts.
+> [!NOTE]
+> For the comprehensive technical deep dive into vector mathematics, section-aware chunking algorithms, prompt assembly, and end-to-end sequence diagrams, please refer to **[`PROJECT_DETAILS_AND_RAG.md`](PROJECT_DETAILS_AND_RAG.md)**.
 
-## Technology Stack
-- **Frontend Framework**: React 18 with Vite
-- **Language**: TypeScript
-- **Routing**: React Router v6
-- **Styling**: Tailwind CSS (custom "paper" and "ink" design system tokens)
-- **UI Components**: Shadcn UI, Lucide React (Icons), Sonner (Toasts)
-- **Backend & Database**: Supabase (PostgreSQL, Auto-generated REST APIs)
-- **Authentication**: Supabase Auth (Google OAuth integration)
-- **External APIs**:
-  - Semantic Scholar API (Paper search and metadata)
-  - Google Gemini AI (Abstract summarization)
-  - NewsAPI (Industry news feed)
+---
 
-## Core Features
-1. **Authentication & Security**: Protected routes enforcing login. User data is strictly partitioned using PostgreSQL Row Level Security (RLS) policies.
-2. **Paper Hub**: Search functionality connecting directly to the Semantic Scholar public graph to fetch real-time academic data.
-3. **Personal Library**:
-   - Organize saved papers into custom folders.
-   - Track reading status (`unread`, `in_progress`, `done`).
-   - Export references to formats like BibTeX, APA, and MLA.
-4. **AI Summarization**: Intelligent extraction of key details (Problem, Method, Findings, Limitations, Significance) using Gemini.
-5. **Graph View**: Visual connection map of related papers.
+## 📌 Executive Summary
 
-## Database Schema (PostgreSQL)
+**RESIN** (Research Engine & Synthesized Intelligence Network) is an end-to-end academic workstation designed for researchers, machine learning engineers, and students. Rather than passively skimming PDFs or relying on hallucinated summaries, RESIN indexes scientific literature into section-aware high-dimensional vector embeddings, empowering users to:
 
-### `users`
-- `id`: uuid (Primary Key)
-- `email`: text (UNIQUE)
-- `topics`: text[]
-- `created_at`: timestamptz
+1. **Grounded Paper Chat (RAG)**: Ask technical questions with real-time SSE streaming and clickable citations pinpointing exact PDF pages and sections.
+2. **Autonomous Multi-Paper Research Agent**: Synthesize literature across multiple papers using an iterative ReAct reasoning loop.
+3. **Resilient Open-Access Discovery**: Automatically harvest verified open-access PDFs across arXiv, OpenAlex, Europe PMC XML, and publisher mirrors.
+4. **Daily Paper Triage**: Receive an automated daily briefing curated specifically for individual research topic interests.
+
+---
+
+## 🏗 Architecture & Technology Stack
+
+| Layer | Technology | Purpose |
+| :--- | :--- | :--- |
+| **Frontend** | React 18, Vite, TypeScript | SPA workstation, reactive UI via TanStack Query, SSE chunk stream consumer |
+| **Styling** | Vanilla Tailwind CSS, Shadcn UI | Academic "paper & ink" design language, responsive drawers, glassmorphic badges |
+| **Backend API** | FastAPI, Python 3.11+, Uvicorn | High-concurrency REST & SSE streaming, SSRF guards, PDF validation |
+| **Database** | PostgreSQL on Supabase | User accounts, library folders, papers dictionary, RLS access control |
+| **Vector Engine** | `pgvector` (`vector(768)`) | IVFFlat indexed similarity search using cosine distance operator (`<=>`) |
+| **AI Models** | Google Gemini (GenAI SDK) | `gemini-embedding-001` (vectors), `gemini-3.5-flash-lite` (low-latency streaming & reasoning) |
+| **PDF Extraction** | PyPDF, BeautifulSoup4 | In-memory binary parsing, page boundary identification, HTML PDF discovery |
+| **Triage Service**| Node.js (ESM), PostgreSQL pool | Scheduled microservice for topic-based paper harvesting & LLM curation |
+
+---
+
+## 🗄 Core Database Schema (PostgreSQL on Supabase)
 
 ### `papers`
-Shared dictionary of all papers saved by any user.
-- `id`: uuid (Primary Key)
-- `doi`: text
-- `title`: text (NOT NULL)
-- `authors`: text[]
-- `year`: integer
-- `abstract`: text
-- `citation_count`: integer (default 0)
-- `open_access_url`: text
-- `semantic_scholar_id`: text (UNIQUE)
-- `arxiv_id`: text (UNIQUE)
-- `updated_at`: timestamptz
-- `created_at`: timestamptz
+Shared canonical repository of scientific papers saved across all users.
+- `id`: `uuid` (Primary Key, resolved deterministically via UUIDv5)
+- `doi`: `text` (Indexed)
+- `title`: `text` (NOT NULL)
+- `authors`: `text[]`
+- `year`: `integer`
+- `abstract`: `text`
+- `citation_count`: `integer`
+- `open_access_url`: `text`
+- `semantic_scholar_id`: `text` (UNIQUE)
+- `arxiv_id`: `text` (UNIQUE)
+- `indexed_at`: `timestamptz`
 
-### `folders`
-- `id`: uuid (Primary Key)
-- `user_id`: uuid (Foreign Key -> users.id)
-- `name`: text (NOT NULL)
-- `created_at`: timestamptz
+### `paper_chunks`
+Granular text segments extracted from paper pages with vector embeddings for RAG retrieval.
+- `id`: `uuid` (Primary Key)
+- `paper_id`: `uuid` (Foreign Key -> `papers.id` ON DELETE CASCADE)
+- `chunk_index`: `integer` (0-indexed position)
+- `section_title`: `text` (Section header or page marker)
+- `content`: `text` (Chunk text content)
+- `embedding`: `vector(768)` (IVFFlat cosine indexed)
+- `word_count`: `integer`
+- `page_number`: `integer` (1-indexed physical PDF page)
+- `document_id`: `text` (Source PDF identifier)
 
-### `user_papers`
-Join table linking users to their saved papers and folders.
-- `id`: uuid (Primary Key)
-- `user_id`: uuid (Foreign Key -> users.id)
-- `paper_id`: uuid (Foreign Key -> papers.id)
-- `folder_id`: uuid (Foreign Key -> folders.id)
-- `notes`: text
-- `status`: text (default 'unread')
-- `saved_at`: timestamptz
+### `paper_embeddings`
+Holistic paper-level 768-dimensional embedding for whole-library semantic search.
+- `id`: `uuid` (Primary Key)
+- `paper_id`: `uuid` (Foreign Key -> `papers.id` UNIQUE)
+- `embedding`: `vector(768)`
 
-### `paper_summaries`
-Shared AI summaries generated for papers.
-- `paper_id`: uuid (Primary Key, Foreign Key -> papers.id)
-- `problem`: text
-- `method`: text
-- `findings`: text
-- `limitations`: text
-- `significance`: text
-- `generated_at`: timestamptz
+### `users` & `user_papers` & `folders`
+User management, hierarchical folders, reading statuses (`unread`, `in_progress`, `done`), and personal notes secured strictly via PostgreSQL Row Level Security (RLS).
 
-## Security (Row Level Security)
-The application relies heavily on Supabase RLS to secure data without needing a custom backend server.
-- **users**: Users can only select, insert, and update their own records.
-- **folders**: Users can manage their own folders based on matching `user_id` with `auth.uid()`.
-- **user_papers**: Users can manage their own saved papers based on matching `user_id` with `auth.uid()`.
-- **papers**: All authenticated users can insert, update, and select from the shared papers dictionary.
-- **paper_summaries**: All authenticated users can manage shared AI summaries.
+### `daily_triage`
+AI-curated daily top 3 paper picks with rationale tailored to user topic preferences.
+
+---
+
+## 🔒 Security & Access Control (Row Level Security)
+
+- **User Isolation**: User libraries, custom folders, and daily triage entries are protected by strict RLS policies bound to `auth.uid()`.
+- **Shared Knowledge Base**: Authenticated users share read access to canonical papers and vectorized chunks to eliminate redundant embedding compute.
+- **SSRF Guards**: The PDF download service enforces strict private IP and loopback blocking against Server-Side Request Forgery.
+- **Service Role Isolation**: Vector writes and administrative RPCs are executed securely by the backend using the Supabase Service Role Key.

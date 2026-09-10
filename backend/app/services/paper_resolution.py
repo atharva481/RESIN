@@ -23,6 +23,10 @@ def to_deterministic_uuid(key: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"resin:{key.strip()}"))
 
 
+# Cache for resolved external IDs -> (canonical_uuid, paper_data)
+_RESOLVED_ID_CACHE: Dict[str, Tuple[str, Dict[str, Any]]] = {}
+
+
 def resolve_paper_record(
     paper_id: str,
     title: Optional[str] = None,
@@ -39,12 +43,18 @@ def resolve_paper_record(
     client = get_supabase_client()
     clean_id = (paper_id or "").strip()
 
+    # Fast memory cache check
+    if clean_id in _RESOLVED_ID_CACHE:
+        cached_uuid, cached_data = _RESOLVED_ID_CACHE[clean_id]
+        return cached_uuid, cached_data
+
     # 1. If it's already a valid UUID, query by id
     if is_valid_uuid(clean_id):
         if client:
             try:
                 res = client.table("papers").select("*").eq("id", clean_id).execute()
                 if res.data:
+                    _RESOLVED_ID_CACHE[clean_id] = (clean_id, res.data[0])
                     return clean_id, res.data[0]
             except Exception as e:
                 logger.warning(f"Error checking UUID paper {clean_id}: {e}")
@@ -66,9 +76,67 @@ def resolve_paper_record(
             res = client.table("papers").select("*").or_(",".join(or_clauses)).limit(1).execute()
             if res.data:
                 row = res.data[0]
-                return row["id"], row
+                # If this row is a real paper (has a title other than Untitled Paper, or has a DOI), use it!
+                if row.get("title") != "Untitled Paper" or row.get("doi"):
+                    _RESOLVED_ID_CACHE[clean_id] = (row["id"], row)
+                    _RESOLVED_ID_CACHE[row["id"]] = (row["id"], row)
+                    if aid:
+                        _RESOLVED_ID_CACHE[aid] = (row["id"], row)
+                    if doi and isinstance(doi, str):
+                        clean_d = doi.strip().replace("https://doi.org/", "")
+                        _RESOLVED_ID_CACHE[clean_d] = (row["id"], row)
+                    return row["id"], row
+
+            # Fallback by title if title is provided
+            if title and isinstance(title, str) and len(title.strip()) > 10:
+                title_res = client.table("papers").select("*").eq("title", title.strip()).limit(1).execute()
+                if title_res.data:
+                    row = title_res.data[0]
+                    _RESOLVED_ID_CACHE[clean_id] = (row["id"], row)
+                    _RESOLVED_ID_CACHE[row["id"]] = (row["id"], row)
+                    return row["id"], row
         except Exception as e:
             logger.warning(f"Error querying paper by external ID '{clean_id}': {e}")
+
+    # 2.5. If clean_id is an OpenAlex ID (e.g., W2252568502), resolve DOI & title via OpenAlex API
+    is_openalex_id = (
+        (clean_id.startswith("W") and clean_id[1:].isdigit())
+        or "openalex.org/W" in clean_id
+    )
+    if is_openalex_id and client:
+        try:
+            import httpx
+            work_short_id = clean_id.split("/")[-1]
+            oa_url = f"https://api.openalex.org/works/{work_short_id}?mailto=resin-academic-app@example.com"
+            with httpx.Client(timeout=4.0) as http_client:
+                r = http_client.get(oa_url)
+                if r.status_code == 200:
+                    work_item = r.json()
+                    oa_doi = work_item.get("doi")
+                    oa_title = work_item.get("title")
+                    resolved_doi = oa_doi.replace("https://doi.org/", "").strip() if oa_doi else None
+
+                    # Query database with resolved DOI
+                    if resolved_doi:
+                        doi_res = client.table("papers").select("*").or_(
+                            f"doi.eq.{resolved_doi},doi.eq.https://doi.org/{resolved_doi}"
+                        ).limit(1).execute()
+                        if doi_res.data:
+                            row = doi_res.data[0]
+                            _RESOLVED_ID_CACHE[clean_id] = (row["id"], row)
+                            logger.info(f"Resolved OpenAlex work {clean_id} -> DOI {resolved_doi} -> DB UUID {row['id']}")
+                            return row["id"], row
+
+                    # Fallback query database by title
+                    if oa_title:
+                        title_res = client.table("papers").select("*").eq("title", oa_title.strip()).limit(1).execute()
+                        if title_res.data:
+                            row = title_res.data[0]
+                            _RESOLVED_ID_CACHE[clean_id] = (row["id"], row)
+                            logger.info(f"Resolved OpenAlex work {clean_id} -> Title '{oa_title}' -> DB UUID {row['id']}")
+                            return row["id"], row
+        except Exception as e:
+            logger.warning(f"Failed to lookup OpenAlex ID '{clean_id}': {e}")
 
     # 3. Non-UUID not found in database: generate deterministic UUID
     canon_key = f"arxiv:{aid}" if aid else clean_id

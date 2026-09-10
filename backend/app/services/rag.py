@@ -17,57 +17,16 @@ from app.agent.formatter import (
 
 logger = logging.getLogger(__name__)
 
-MAX_RETRIES = 3
-RETRY_DELAY = 2.0  # seconds
+from app.services.gemini_service import (
+    GeminiService,
+    classify_gemini_error,
+    ensure_gemini_configured as _ensure_configured,
+)
 
 
-def _ensure_configured():
-    if settings.gemini_api_key and settings.gemini_api_key != "placeholder-gemini-key":
-        genai.configure(api_key=settings.gemini_api_key)
-
-
-_ensure_configured()
-
-
-def _parse_retry_delay(error_msg: str) -> float:
-    """Parse recommended retry seconds from 429 error message if available."""
-    match = re.search(r"retry in ([0-9\.]+)s", error_msg, re.IGNORECASE)
-    if match:
-        try:
-            return float(match.group(1))
-        except ValueError:
-            pass
-    return 10.0
-
-
-def _with_retry(fn, *args, max_retries=MAX_RETRIES, retry_delay=RETRY_DELAY, **kwargs):
-    """Retry a Gemini API call with exponential backoff and 429 rate-limit handling."""
-    _ensure_configured()
-    last_exc = None
-    for attempt in range(1, max_retries + 1):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as e:
-            last_exc = e
-            err_str = str(e)
-            if "404" in err_str or "not found" in err_str or "no longer available" in err_str:
-                raise e
-            if "429" in err_str or "quota" in err_str.lower():
-                wait = _parse_retry_delay(err_str)
-                if attempt < max_retries:
-                    logger.warning(
-                        f"Gemini API rate limited (429). Waiting {wait:.1f}s before retry (attempt {attempt}/{max_retries})..."
-                    )
-                    time.sleep(min(wait, 12.0))
-                    continue
-            elif attempt < max_retries:
-                wait = retry_delay * (2 ** (attempt - 1))
-                logger.warning(f"Gemini API attempt {attempt} failed: {e}. Retrying in {wait}s...")
-                time.sleep(wait)
-    logger.error(f"Gemini API failed after {max_retries} attempts: {last_exc}")
-    if last_exc is not None:
-        raise last_exc
-    raise RuntimeError(f"Gemini API failed after {max_retries} attempts.")
+def _with_retry(fn, *args, **kwargs):
+    """Execute Gemini API call using centralized GeminiService."""
+    return GeminiService.call_with_retry(fn, *args, **kwargs)
 
 
 SYSTEM_RAG_PROMPT = r"""You are an expert scientific AI research assistant for the RESIN platform.
@@ -96,8 +55,8 @@ class RAGService:
         self.model_name = settings.gemini_chat_model
         _ensure_configured()
 
-    def _format_context(self, citations: List[Citation]) -> str:
-        """Format chunk citations into clean text evidence blocks for RAG prompt."""
+    def _format_context(self, citations: List[Citation], max_snippet_chars: int = 1200) -> str:
+        """Format chunk citations into clean, high-density text evidence blocks for RAG prompt."""
         if not citations:
             return "No relevant paper context chunks found."
         blocks = []
@@ -107,7 +66,9 @@ class RAGService:
                 sec = sec[9:-1].strip()
             page_str = f" | Page {cit.page_number}" if cit.page_number else ""
             title_str = f"Paper: {cit.paper_title}\n" if cit.paper_title else ""
-            snippet = cit.content_snippet
+            snippet = cit.content_snippet.strip()
+            if len(snippet) > max_snippet_chars:
+                snippet = snippet[:max_snippet_chars].rsplit(" ", 1)[0] + "..."
             blocks.append(f"{title_str}Section: {sec}{page_str}\nEvidence:\n{snippet}")
         return "\n\n".join(blocks)
 
@@ -127,8 +88,7 @@ class RAGService:
         raw = [
             self.model_name,
             "models/gemini-3.5-flash-lite",
-            "models/gemini-3.5-flash",
-            "models/gemini-3.6-flash",
+            "models/gemini-3.1-flash-lite",
         ]
         unique = []
         for m in raw:
@@ -146,7 +106,7 @@ class RAGService:
         citations = self.retrieval_service.retrieve_context(
             query=question,
             paper_id=paper_id,
-            top_k=4,
+            top_k=3,
         )
 
         intent = detect_question_intent(question)
@@ -159,8 +119,14 @@ class RAGService:
 
         prompt = question
         if history:
-            prev_convo = "\n".join([f"{msg.role.capitalize()}: {msg.content}" for msg in history[-4:]])
-            prompt = f"Previous conversation:\n{prev_convo}\n\nCurrent Question: {question}"
+            # Compact history to last 2 turns with trimmed assistant replies to avoid free-tier TPM quota exhaustion
+            compact_convo = []
+            for msg in history[-2:]:
+                content = msg.content
+                if msg.role == "assistant" and len(content) > 250:
+                    content = content[:250].rsplit(" ", 1)[0] + "..."
+                compact_convo.append(f"{msg.role.capitalize()}: {content}")
+            prompt = f"Previous conversation:\n" + "\n".join(compact_convo) + f"\n\nCurrent Question: {question}"
 
         full_prompt = f"{system_instruction}\n\n{prompt}"
         models = self._get_chat_models()
@@ -175,11 +141,24 @@ class RAGService:
                 return ChatResponse(answer=clean_answer, citations=citations)
             except Exception as e:
                 last_error = e
+                is_daily, is_transient, _ = classify_gemini_error(e)
+                if is_daily:
+                    logger.error(f"Gemini daily quota exhausted in answer_question: {e}")
+                    user_msg = "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
+                    return ChatResponse(answer=user_msg, citations=citations)
+                if is_transient:
+                    # Do not cascade through all models on 429; the entire API key is rate limited
+                    logger.warning(f"Gemini rate limit reached on {m_name}. Fast failing to avoid retry cascade.")
+                    user_msg = "Gemini rate limit reached (429). Please wait ~5 seconds and ask your question again."
+                    return ChatResponse(answer=user_msg, citations=citations)
                 logger.warning(f"Chat model {m_name} failed: {e}. Trying next chat model...")
 
         err_msg = str(last_error)
-        if "429" in err_msg or "quota" in err_msg.lower():
-            user_msg = "Gemini free tier rate limit reached. Please wait ~10 seconds and ask your question again."
+        is_daily, is_transient, _ = classify_gemini_error(last_error) if last_error else (False, False, 0)
+        if is_daily:
+            user_msg = "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
+        elif is_transient:
+            user_msg = "Gemini rate limit reached (429). Please wait ~5 seconds and ask your question again."
         else:
             user_msg = f"I encountered an error generating the answer: {err_msg}"
 
@@ -289,7 +268,7 @@ class RAGService:
             citations = self.retrieval_service.retrieve_context(
                 query=question,
                 paper_id=paper_id,
-                top_k=4,
+                top_k=3,
             )
             intent = detect_question_intent(question)
             fmt_instructions = get_intent_formatting_instructions(intent)
@@ -306,10 +285,14 @@ class RAGService:
 
         prompt = question
         if history:
-            prev_convo = "\n".join(
-                [f"{msg.role.capitalize()}: {msg.content}" for msg in history[-4:]]
-            )
-            prompt = f"Previous conversation:\n{prev_convo}\n\nCurrent Question: {question}"
+            # Compact history to last 2 turns with trimmed assistant replies to avoid free-tier TPM quota exhaustion
+            compact_convo = []
+            for msg in history[-2:]:
+                content = msg.content
+                if msg.role == "assistant" and len(content) > 250:
+                    content = content[:250].rsplit(" ", 1)[0] + "..."
+                compact_convo.append(f"{msg.role.capitalize()}: {content}")
+            prompt = f"Previous conversation:\n" + "\n".join(compact_convo) + f"\n\nCurrent Question: {question}"
 
         full_prompt = f"{system_instruction}\n\n{prompt}"
         models = self._get_chat_models()
@@ -335,6 +318,21 @@ class RAGService:
                     return
             except Exception as e:
                 last_error = e
+                is_daily, is_transient, _ = classify_gemini_error(e)
+                if is_daily:
+                    logger.error(f"Gemini daily quota exhausted in stream_answer: {e}")
+                    err_payload = json.dumps({
+                        "error": "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
+                    })
+                    yield f"data: {err_payload}\n\n"
+                    return
+                if is_transient:
+                    logger.warning(f"Gemini rate limit reached on {m_name}. Fast failing to avoid retry cascade.")
+                    err_payload = json.dumps({
+                        "error": "Gemini rate limit reached (429). Please wait ~5 seconds before sending your next question."
+                    })
+                    yield f"data: {err_payload}\n\n"
+                    return
                 logger.warning(f"Streaming chat model {m_name} failed: {e}")
                 if stream_started:
                     # Do not attempt secondary models if streaming has already started to client
@@ -343,10 +341,12 @@ class RAGService:
                     return
 
         if not stream_started and last_error:
-            err_msg = str(last_error)
-            if "429" in err_msg or "quota" in err_msg.lower():
-                user_msg = "Gemini free tier rate limit reached. Please wait ~10 seconds before asking again."
+            is_daily, is_transient, _ = classify_gemini_error(last_error)
+            if is_daily:
+                user_msg = "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
+            elif is_transient:
+                user_msg = "Gemini rate limit reached (429). Please wait ~10 seconds before asking again."
             else:
-                user_msg = f"Streaming error: {err_msg}"
+                user_msg = f"Streaming error: {str(last_error)}"
             err_payload = json.dumps({"error": user_msg})
             yield f"data: {err_payload}\n\n"

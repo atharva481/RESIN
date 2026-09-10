@@ -73,6 +73,9 @@ def _enforce_768_dims(val: Any) -> Any:
     return val
 
 
+from app.services.gemini_service import GeminiService
+
+
 class EmbeddingService:
     """Service for generating text embeddings using Gemini embedding models."""
 
@@ -81,47 +84,27 @@ class EmbeddingService:
         _ensure_configured()
 
     def _call_embed(self, contents: Any, task_type: str):
-        """Call genai.embed_content with dynamic model discovery, fallback, and 768-dim truncation."""
-        _ensure_configured()
-        candidate_models = [self.model_name] + _get_embedding_models()
-        models_to_try = []
-        for m in candidate_models:
-            if m and m not in models_to_try:
-                models_to_try.append(m)
-
-        last_err = None
-        for model in models_to_try:
-            try:
-                try:
-                    res = _with_retry(
-                        genai.embed_content,
-                        model=model,
-                        content=contents,
-                        task_type=task_type,
-                        output_dimensionality=768,
-                    )
-                except Exception as inner_err:
-                    err_str = str(inner_err)
-                    if "404" in err_str or "not found" in err_str or "no longer available" in err_str:
-                        raise inner_err
-                    # Fallback for models or API wrappers that do not accept output_dimensionality parameter
-                    res = _with_retry(
-                        genai.embed_content,
-                        model=model,
-                        content=contents,
-                        task_type=task_type,
-                    )
-                return _enforce_768_dims(res)
-            except Exception as e:
-                last_err = e
-                err_str = str(e)
-                if "404" in err_str or "not found" in err_str or "supported" in err_str:
-                    logger.warning(f"Embedding model '{model}' not supported or 404. Retrying next model...")
-                    continue
-                raise e
-        if last_err is not None:
-            raise last_err
-        raise RuntimeError("No embedding models available or all attempts failed.")
+        """Call genai.embed_content with 768-dim truncation and centralized quota handling."""
+        model = self.model_name
+        try:
+            res = GeminiService.call_with_retry(
+                genai.embed_content,
+                model=model,
+                content=contents,
+                task_type=task_type,
+                output_dimensionality=768,
+            )
+        except Exception as inner_err:
+            err_str = str(inner_err)
+            if "daily quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
+                raise inner_err
+            # Fallback for models or API wrappers that do not accept task_type/output_dimensionality parameters
+            res = GeminiService.call_with_retry(
+                genai.embed_content,
+                model=model,
+                content=contents,
+            )
+        return _enforce_768_dims(res)
 
     def embed_text(self, text: str) -> List[float]:
         """Generate 768-dim embedding vector for a single text query or document."""
@@ -131,13 +114,28 @@ class EmbeddingService:
         """Generate 768-dim embedding vector for a search query."""
         return self._call_embed(query, task_type="retrieval_query")
 
-    def embed_batch(self, texts: List[str], batch_size: int = 5) -> List[List[float]]:
-        """Generate embeddings for a list of text chunks in manageable batches to avoid payload/stream reset issues."""
+    def embed_batch(self, texts: List[str], batch_size: int = 100) -> List[List[float]]:
+        """Generate embeddings for a list of text chunks in a single fast batch call, with fallback."""
         if not texts:
             return []
+        # Fast path: send all chunks in 1 call (typically ~2 seconds for 50-60 chunks)
+        if len(texts) <= batch_size:
+            try:
+                res = self._call_embed(texts, task_type="retrieval_document")
+                if isinstance(res, list) and res and isinstance(res[0], list):
+                    return res
+                elif isinstance(res, list) and res and isinstance(res[0], (int, float)):
+                    return [res]
+            except Exception as e:
+                err_str = str(e).lower()
+                if "daily quota" in err_str or "resource_exhausted" in err_str:
+                    raise e
+                logger.warning(f"Single batch embedding of {len(texts)} chunks failed ({e}). Splitting into sub-batches...")
+
         all_embeddings: List[List[float]] = []
-        for i in range(0, len(texts), batch_size):
-            chunk_batch = texts[i : i + batch_size]
+        sub_size = 30
+        for i in range(0, len(texts), sub_size):
+            chunk_batch = texts[i : i + sub_size]
             try:
                 res = self._call_embed(chunk_batch, task_type="retrieval_document")
                 if isinstance(res, list) and res and isinstance(res[0], list):
@@ -147,8 +145,7 @@ class EmbeddingService:
                 else:
                     raise ValueError(f"Unexpected embedding format: {type(res)}")
             except Exception as e:
-                logger.warning(f"Batch embedding failed for batch starting at {i}: {e}. Retrying item-by-item...")
-                for text in chunk_batch:
-                    vec = self.embed_text(text)
-                    all_embeddings.append(vec)
+                logger.error(f"Batch embedding failed at index {i}: {e}")
+                raise e
+
         return all_embeddings

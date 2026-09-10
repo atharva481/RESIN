@@ -207,8 +207,8 @@ class IndexingService:
             )
 
         if client:
-            # Batch upsert into paper_chunks to prevent HTTP/2 StreamReset / payload limits
-            batch_size = 5
+            # Batch upsert into paper_chunks in single call or batches of 100
+            batch_size = 100
             for i in range(0, len(db_records), batch_size):
                 batch = db_records[i : i + batch_size]
                 try:

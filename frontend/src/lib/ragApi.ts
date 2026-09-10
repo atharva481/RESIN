@@ -88,7 +88,9 @@ export async function uploadPaperPdf(paperId: string, file: File): Promise<RagIn
 export async function askPaperRAG(
   paperId: string,
   message: string,
-  history: RagChatMessage[] = []
+  history: RagChatMessage[] = [],
+  doi?: string | null,
+  title?: string | null,
 ): Promise<RagChatResponse> {
   const headers = await getAuthHeader();
   const response = await fetch(`${BACKEND_URL}/api/chat`, {
@@ -96,6 +98,8 @@ export async function askPaperRAG(
     headers,
     body: JSON.stringify({
       paper_id: paperId,
+      doi: doi ?? undefined,
+      title: title ?? undefined,
       message,
       history,
     }),
@@ -120,6 +124,8 @@ export async function streamPaperRAG(
   onChunk: (text: string) => void,
   onDone: () => void,
   onError: (error: Error) => void,
+  doi?: string | null,
+  title?: string | null,
 ): Promise<AbortController> {
   const headers = await getAuthHeader();
   const controller = new AbortController();
@@ -129,6 +135,8 @@ export async function streamPaperRAG(
     headers,
     body: JSON.stringify({
       paper_id: paperId,
+      doi: doi ?? undefined,
+      title: title ?? undefined,
       message,
       history,
     }),

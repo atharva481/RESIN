@@ -15,9 +15,12 @@ from app.agent.formatter import (
     get_intent_formatting_instructions,
 )
 
+from app.services.gemini_service import GeminiService, classify_gemini_error
+
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_CALLS = 15
+# Budget tool calls to 8 to avoid exhausting Gemini free-tier RPM/RPD limits
+MAX_TOOL_CALLS = 8
 
 
 def _ensure_configured():
@@ -128,22 +131,15 @@ class ResearchAgent:
         convo_messages.append({"role": "user", "parts": [user_prompt]})
 
         # Initialize Gemini Model with tools & system instruction
-        models_to_try = [self.model_name, "models/gemini-3.6-flash", "models/gemini-3.5-flash", "gemini-flash-latest"]
-        model = None
-        for m_name in models_to_try:
-            try:
-                model = genai.GenerativeModel(
-                    model_name=m_name,
-                    system_instruction=full_system_instruction,
-                    tools=TOOL_DECLARATIONS,
-                )
-                break
-            except Exception as e:
-                logger.warning(f"Could not initialize GenerativeModel with {m_name}: {e}")
-
-        if not model:
-            # Fallback without system instruction parameter if unsupported by SDK version
-            model = genai.GenerativeModel(model_name="models/gemini-flash-latest", tools=TOOL_DECLARATIONS)
+        try:
+            model = genai.GenerativeModel(
+                model_name=self.model_name,
+                system_instruction=full_system_instruction,
+                tools=TOOL_DECLARATIONS,
+            )
+        except Exception as e:
+            logger.warning(f"Could not initialize GenerativeModel with {self.model_name}: {e}. Trying fallback...")
+            model = genai.GenerativeModel(model_name="models/gemini-3.5-flash-lite", tools=TOOL_DECLARATIONS)
 
         chat = model.start_chat(history=convo_messages[:-1])
         all_citations: List[Citation] = []
@@ -158,8 +154,17 @@ class ResearchAgent:
             except Exception as e:
                 err_str = str(e)
                 logger.error(f"Gemini API error in step {step}: {err_str}")
-                if "429" in err_str or "quota" in err_str.lower():
-                    time.sleep(5.0)
+                is_daily, is_transient, wait_sec = classify_gemini_error(e)
+                if is_daily:
+                    self._update_agent_run(run_id, "FAILED")
+                    return ChatResponse(
+                        answer="⚠️ Gemini daily API quota has been reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio.",
+                        citations=[]
+                    )
+                if is_transient:
+                    wait = min(wait_sec, 12.0)
+                    logger.warning(f"Gemini transient rate limit in agent step {step}. Waiting {wait:.1f}s...")
+                    time.sleep(wait)
                     try:
                         response = chat.send_message(current_input)
                     except Exception as retry_err:

@@ -1,0 +1,60 @@
+# ==========================================
+# RESIN Backend (FastAPI) - .gitignore
+# ==========================================
+
+# Environment variables & secrets
+.env
+.env.*
+*.env
+*.env.*
+*.local
+!.env.example
+
+# Python Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+*.manifest
+*.spec
+
+# Cryptographic keys & certs
+*.pem
+*.key
+*.cert
+
+# Logs & temp
+*.log
+logs/
+tmp/
+temp/
+scratch/
+uploads/
+temp_downloads/
+pdf_cache/
+.cache/
+
+# Databases
+*.sqlite
+*.sqlite3
+*.db
+
+# IDE & OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db

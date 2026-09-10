@@ -22,6 +22,7 @@ class ChunkInfo(BaseModel):
 
 class IndexPaperResponse(BaseModel):
     paper_id: str
+    canonical_paper_id: Optional[str] = None
     chunks_created: int
     chunks: List[ChunkInfo]
     status: Literal["success", "warning", "error"] = "success"

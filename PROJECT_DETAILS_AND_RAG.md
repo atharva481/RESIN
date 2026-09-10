@@ -45,8 +45,9 @@ RESIN/
 │   │   ├── services/                   # Business Logic & Core Infrastructure
 │   │   │   ├── chat_service.py         # Chat turn persistence in chat_history table
 │   │   │   ├── chunking.py             # TextChunker (section-aware, word-overlap, page-aware)
-│   │   │   ├── embeddings.py           # Gemini 768-dim embeddings with batching & fallback
-│   │   │   ├── indexing.py             # IndexingService (PDF page chunking, upserting, embeddings)
+│   │   │   ├── embeddings.py           # Single-call batch Gemini 768-dim embeddings
+│   │   │   ├── gemini_service.py       # Unified Google GenAI client, 429 guards & model fallback
+│   │   │   ├── indexing.py             # IndexingService (PDF page chunking, upserting, batching)
 │   │   │   ├── open_access.py          # Multi-source open access discovery & HTML PDF engine
 │   │   │   ├── paper_resolution.py     # Deterministic UUIDv5 canonical resolution & DB de-duplication
 │   │   │   ├── pdf.py                  # PDFService (SSRF validation, download taxonomy, PyPDF)
@@ -60,7 +61,8 @@ RESIN/
 │   │   ├── 20260904_agent_runs_and_page_numbers.sql
 │   │   └── full_rag_setup.sql          # Complete database & RPC setup script
 │   ├── requirements.txt                # Python dependencies (FastAPI, Supabase, Google-GenAI, PyPDF, etc.)
-│   └── uvicorn                         # ASGI development server runner
+│   ├── .gitignore                      # Backend-specific ignore rules
+│   └── .env.example                    # Backend environment template
 │
 ├── frontend/                            # React 18 + Vite + TypeScript Frontend
 │   ├── src/
@@ -89,7 +91,8 @@ RESIN/
 ├── resin-triage/                        # Background Node.js Triage Microservice
 │   ├── daily-triage.js                 # Daily user topic scanner, OpenAlex candidate fetcher, Gemini curator
 │   ├── package.json                    # Node dependencies (pg, dotenv)
-│   └── .env                            # Triage database connection & Gemini API key
+│   ├── .gitignore                      # Triage-specific ignore rules
+│   └── .env.example                    # Triage database connection & Gemini API key template
 │
 ├── project_details.md                  # Initial summary specification
 └── PROJECT_DETAILS_AND_RAG.md          # Comprehensive Architecture & RAG Deep Dive (This file)
@@ -129,8 +132,8 @@ The RAG pipeline in RESIN is custom-engineered to solve the real-world obstacles
     |          --> If yes: Return in ~40ms ("Already Indexed")        |
     |          --> If < 5 (stale partial chunks): Purge & re-index    |
     |                                                                 |
-    |  Step 3: Build Ranked Candidate Priority Queue (Priorities 50-105)|
-    |          - Priority 105: Direct arXiv PDF synthesized from ID   |
+    |  Step 3: Build Ranked Candidate Priority Queue (Priorities 50-120)|
+    |          - Priority 120: Direct arXiv PDF synthesized from ID   |
     |          - Priority 100: PMC / Europe PMC structured XML & PDF  |
     |          - Priority 95:  Semantic Scholar verified OA PDF link  |
     |          - Priority 90:  OpenAlex primary location pdf_url      |
@@ -168,14 +171,14 @@ The RAG pipeline in RESIN is custom-engineered to solve the real-world obstacles
     |  1. TextChunker splits pages/sections into overlapping windows: |
     |     - Chunk Size: ~600 words | Overlap: ~100 words              |
     |     - Page Number & Section Title tagged to each chunk          |
-    |  2. EmbeddingService:                                           |
+    |  2. EmbeddingService (Single-Call High Throughput):             |
     |     - Model: `models/gemini-embedding-001`                      |
     |     - Strict dimension enforcement: Vector(768)                 |
-    |     - Batching: Processed in batches of 5 chunks                |
-    |     - Fallback: Auto-downgrades to item-by-item if batch fails  |
+    |     - High-Performance Batching: Unified single-call (size=100) |
+    |     - Speed: 50+ chunks embedded in ~2.1s instead of 20+s       |
+    |     - Resilient Fallback: Item-by-item downgrade if batch fails |
     |  3. Database Storage:                                           |
-    |     - Upserted into `paper_chunks` in batches of 5              |
-    |     - Avoids HTTP/2 StreamReset / payload size overflows        |
+    |     - Upserted into `paper_chunks` in batches of 100            |
     |     - Generates holistic paper-level vector into `paper_embeddings`|
     +-----------------------------------------------------------------+
 ```
@@ -196,9 +199,9 @@ To prevent PostgreSQL foreign key (`23503`) or unique key (`23505`) violations w
 - If missing, derives a **deterministic UUIDv5** from `doi` (or `semantic_scholar_id`, or normalized title).
 - Atomically guarantees that the paper record exists before any chunk indexing starts.
 
-#### 2. Ranked Candidate Priority Queue (Priorities 50–105)
+#### 2. Ranked Candidate Priority Queue (Priorities 50–120)
 Rather than trying arbitrary URLs in arbitrary order, candidates are ranked by expected fidelity and bot accessibility:
-- **Priority 105 (Direct arXiv PDF):** Clean regex extraction of arXiv ID (from `10.48550/arxiv.XXXX.XXXXX`, `arxiv.org/abs/...`, or raw IDs) yields `https://arxiv.org/pdf/{arxiv_id}.pdf`.
+- **Priority 120 (Direct arXiv PDF):** Clean regex extraction of arXiv ID (from `10.48550/arxiv.XXXX.XXXXX`, `arxiv.org/abs/...`, or raw IDs) yields `https://arxiv.org/pdf/{arxiv_id}.pdf`. Always free, instant, and high-throughput.
 - **Priority 100 (Europe PMC / NCBI E-utilities):** Resolved PMC IDs (`PMC4320685`) point directly to Europe PMC open endpoints (`https://europepmc.org/backend/ptpmcrender.fcgi?accid={pmcid}&blobtype=pdf`).
 - **Priority 95 (Semantic Scholar Open Access):** Verified `openAccessPdf` link from the S2 Graph API.
 - **Priority 90 (OpenAlex Primary Location):** Verified `best_oa_location.pdf_url` from OpenAlex.
@@ -240,7 +243,7 @@ When a biomedical or life sciences paper on PubMed Central has a paywalled or bo
 
 #### 6. Embedding Suppression & Manual User PDF Upload
 - **Zero Hallucination / No Misleading 1-Chunk Embeddings:** If all automated discovery candidates encounter a paywall or login gate, RESIN **does not generate fake single-chunk embeddings from the abstract**. Instead, it reports the exact diagnostic reason to the user in the UI.
-- **Direct User PDF Upload (`POST /api/papers/{paper_id}/upload-pdf`):** If a user owns or has institutional access to a PDF of a paywalled paper, they can upload it directly through the UI. The backend receives the multipart file, validates the `%PDF-` magic header, extracts all pages via `PyPDF`, splits them into section-aware chunks, generates 768-dim Gemini embeddings, and upserts them into `paper_chunks` in batches of 5.
+- **Direct User PDF Upload (`POST /api/papers/{paper_id}/upload-pdf`):** If a user owns or has institutional access to a PDF of a paywalled paper, they can upload it directly through the UI. The backend receives the multipart file, validates the `%PDF-` magic header, extracts all pages via `PyPDF`, splits them into section-aware chunks, generates 768-dim Gemini embeddings, and upserts them into `paper_chunks` in unified batches of 100.
 
 ---
 
@@ -259,7 +262,8 @@ When a valid PDF is downloaded, text is extracted page by page via `PyPDF`. The 
    - **Model:** `models/gemini-embedding-001`.
    - **Task Type:** `retrieval_document` during indexing; `retrieval_query` during user search.
    - **Dimension Strictness:** Sliced to exactly 768 dimensions using `output_dimensionality=768` and `_enforce_768_dims()`, perfectly matching Supabase `vector(768)` columns.
-   - **Batch Chunking:** Chunks are embedded and upserted in **batches of 5** to avoid HTTP/2 stream resets or payload size limits over network connections.
+   - **High-Throughput Batch Vectorization:** Chunks are vectorized using single-call batch requests (`batch_size = 100`), processing 50–60 chunks in ~2.1 seconds (instead of 20+ seconds over sequential calls).
+   - **Resilient Fallback:** Automatically falls back to item-by-item generation if a batch exceeds payload or token thresholds.
 
 ---
 
@@ -391,8 +395,15 @@ The system prompt enforces strict constraints:
 3. **Structured Formats:** Automatically formats comparisons as Markdown tables, procedural workflows as numbered lists, and key takeaways as bulleted summaries.
 4. **Citation Badging:** The frontend maps each chunk citation to a pill badge displaying the paper title, chunk number, and **exact page number** from the PDF.
 
-#### Why `gemini-3.5-flash-lite`?
-Earlier configurations using `models/gemini-3.6-flash` suffered from an internal reasoning/thinking pause that delayed token output by 8–10 seconds. Switching the primary generation model to `models/gemini-3.5-flash-lite` reduced generation latency to **1.6 seconds**, delivering a total Time-to-First-Token (TTFT) of ~4.5 seconds and total stream completion in ~5.4 seconds.
+#### Why `gemini-3.5-flash-lite` & Context Compaction?
+- **Low-Latency Generation:** Earlier configurations using thinking-enabled models suffered from an internal reasoning pause that delayed token output by 8–10 seconds. Primary streaming on `models/gemini-3.5-flash-lite` delivers an average **Time-to-First-Token (TTFT) of ~1.1 seconds**.
+- **Context Density Optimization:** Multi-turn chat sessions automatically compact conversation history to the most recent 2 turns and cap citation snippets at 1,200 characters. This eliminates Gemini 429 token/request exhaustion and prevents compounding 10–20s response pauses after multiple follow-up questions.
+- **Fail-Fast 429 Handling:** If upstream Gemini free-tier rate limits are reached, the service fails fast immediately with a clear user prompt, rather than initiating a cascading, slow multi-model retry loop.
+
+#### Frontend Resilient AI Summarization (503 Demand Failover)
+In [`frontend/src/lib/gemini.ts`](file:///c:/Users/VARAD/Documents/GitHub/RESIN/frontend/src/lib/gemini.ts), single-click 5-point abstract summaries feature:
+- **Automatic Jittered Retry:** If Google AI Studio returns `503 UNAVAILABLE` ("This model is currently experiencing high demand"), the client automatically pauses and retries.
+- **Dynamic Candidate Model Failover:** Sequentially attempts candidate endpoints (`gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-flash-lite-latest` → `gemini-flash-latest`), guaranteeing summary completion even during global peak-load demand spikes.
 
 ---
 
@@ -418,13 +429,13 @@ sequenceDiagram
         API-->>FE: {"status": "success", "message": "Paper already indexed"} (~40ms)
     else Needs indexing or force=true
         API->>OA: find_pdf_candidates(doi, arxiv_id, existing_oa_url, title)
-        OA-->>API: [Candidate 1 (arXiv), Candidate 2 (S2), ...]
+        OA-->>API: [Candidate 1 (arXiv Priority 120), Candidate 2 (PMC), ...]
         loop For each candidate until valid PDF
             API->>PDF: download_pdf(url) & extract_pages()
             PDF-->>API: 14 pages extracted
         end
-        API->>GEM: embed_batch(chunk_texts) in batches of 5
-        GEM-->>API: 37 vectors (768 dimensions)
+        API->>GEM: embed_batch(chunk_texts) in single call (size=100)
+        GEM-->>API: 37 vectors (768 dimensions) in ~2.1s
         API->>DB: Batch upsert chunks into paper_chunks
         API->>DB: UPDATE papers SET indexed_at = now()
         API-->>FE: {"status": "success", "chunks_created": 37}

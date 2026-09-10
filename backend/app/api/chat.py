@@ -25,7 +25,11 @@ def chat_endpoint(
     """Synchronous single-paper RAG Q&A with Redis response caching."""
     if payload.paper_id:
         from app.services.paper_resolution import resolve_paper_record
-        canonical_id, _ = resolve_paper_record(payload.paper_id)
+        canonical_id, _ = resolve_paper_record(
+            paper_id=payload.paper_id,
+            doi=payload.doi,
+            title=payload.title,
+        )
 
         cached = cache_service.get_cached_response(canonical_id, payload.message)
         if cached:
@@ -62,7 +66,11 @@ def chat_stream_endpoint(
     """Server-Sent Events streaming RAG & Agent endpoint."""
     if payload.paper_id:
         from app.services.paper_resolution import resolve_paper_record
-        canonical_id, _ = resolve_paper_record(payload.paper_id)
+        canonical_id, _ = resolve_paper_record(
+            paper_id=payload.paper_id,
+            doi=payload.doi,
+            title=payload.title,
+        )
 
         return StreamingResponse(
             rag_service.stream_answer(

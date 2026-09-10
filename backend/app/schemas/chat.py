@@ -9,6 +9,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     paper_id: Optional[str] = Field(None, description="Target paper UUID (optional for library chat)")
+    doi: Optional[str] = Field(None, description="Paper DOI for exact canonical resolution")
+    title: Optional[str] = Field(None, description="Paper title for resolution")
     message: str = Field(..., description="User question / prompt")
     history: Optional[List[ChatMessage]] = Field(default=[], description="Previous conversation turns")
     folder_id: Optional[str] = Field(None, description="Optional folder UUID for scoped search")

@@ -489,7 +489,7 @@ class OpenAccessService:
             add_candidate(
                 f"https://arxiv.org/pdf/{discovered_aid}.pdf",
                 source="arxiv_direct",
-                priority=100,
+                priority=120,
                 c_type="direct_pdf",
                 aid=discovered_aid,
             )
@@ -530,7 +530,7 @@ class OpenAccessService:
                             add_candidate(
                                 f"https://arxiv.org/pdf/{s2_arxiv}.pdf",
                                 source="semantic_scholar_arxiv",
-                                priority=100,
+                                priority=120,
                                 c_type="direct_pdf",
                                 aid=s2_arxiv,
                             )

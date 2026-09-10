@@ -51,6 +51,7 @@ def index_paper_endpoint(
                     logger.info(f"Paper {canonical_id} (requested {paper_id}) is already indexed ({existing.count} chunks). Skipping re-index.")
                     return IndexPaperResponse(
                         paper_id=paper_id,
+                        canonical_paper_id=canonical_id,
                         chunks_created=existing.count,
                         chunks=[],
                         status="success",
@@ -87,7 +88,9 @@ def index_paper_endpoint(
 
         failure_log: List[Dict[str, Any]] = []
 
-        for cand in candidates:
+        # Test up to 4 highest-priority candidates to keep indexing fast
+        sorted_candidates = sorted(candidates, key=lambda c: c.get("priority", 0), reverse=True)
+        for cand in sorted_candidates[:4]:
             pdf_url = cand["url"]
             source = cand["source"]
             prio = cand.get("priority", 0)
@@ -146,6 +149,7 @@ def index_paper_endpoint(
                 abstract=abstract,
             )
             response.paper_id = paper_id
+            response.canonical_paper_id = canonical_id
             return response
 
         # 2.5. Check for PubMed Central (PMC) full text (Open Access via NCBI E-utilities / Europe PMC)
@@ -167,6 +171,7 @@ def index_paper_endpoint(
                     abstract=abstract,
                 )
                 res.paper_id = paper_id
+                res.canonical_paper_id = canonical_id
                 res.message = f"Successfully indexed {res.chunks_created} full-text sections from PubMed Central (Open Access)."
                 return res
 
@@ -194,6 +199,7 @@ def index_paper_endpoint(
         logger.info(f"Paper {canonical_id} indexing stopped: {reason_msg}. Skipping embedding generation.")
         return IndexPaperResponse(
             paper_id=paper_id,
+            canonical_paper_id=canonical_id,
             chunks_created=0,
             chunks=[],
             status="warning",
@@ -234,6 +240,7 @@ async def upload_pdf_endpoint(
             document_id=file.filename or "uploaded.pdf",
         )
         res.paper_id = paper_id
+        res.canonical_paper_id = canonical_id
         res.message = f"Successfully extracted and indexed {len(pages_data)} pages ({res.chunks_created} chunks) from uploaded PDF."
         return res
 

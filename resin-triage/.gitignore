@@ -1,3 +1,26 @@
+# ==========================================
+# RESIN Triage Microservice - .gitignore
+# ==========================================
+
+# Environment variables & secrets
 .env
+.env.*
+*.env
+*.env.*
+*.local
 !.env.example
+
+# Node dependencies
 node_modules/
+.npm/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

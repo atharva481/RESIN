@@ -88,6 +88,7 @@ export interface RagChatResponse {
 
 export interface RagIndexResponse {
   paper_id: string;
+  canonical_paper_id?: string;
   chunks_created: number;
   status: "success" | "warning" | "error";
   message: string;
