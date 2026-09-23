@@ -27,3 +27,6 @@ class IndexPaperResponse(BaseModel):
     chunks: List[ChunkInfo]
     status: Literal["success", "warning", "error"] = "success"
     message: str = "Paper successfully chunked and embedded."
+    is_reindex: bool = Field(False, description="True if a previous partial/stale index (<5 chunks) was purged and re-indexed")
+    failure_reason: Optional[str] = Field(None, description="Diagnostic failure code e.g. EMBEDDING_QUOTA_EXCEEDED, PAYWALL_DETECTED")
+

@@ -57,8 +57,96 @@ def classify_gemini_error(exc: Exception) -> Tuple[bool, bool, float]:
     return False, is_transient, retry_after
 
 
+# Model cooldown tracking: model_name -> cooldown_until_timestamp
+_MODEL_COOLDOWNS: dict = {}
+
+
 class GeminiService:
-    """Centralized service for invoking Gemini models with structured error handling."""
+    """Centralized service for invoking Gemini models with structured error handling and cooldown tracking."""
+
+    @classmethod
+    def mark_model_cooldown(cls, model_name: str, cooldown_seconds: float = 60.0, reason: str = "") -> None:
+        """
+        Mark a model on cooldown for a given duration (default 60s) due to rate-limiting or errors.
+        This prevents subsequent requests from trying and failing on this model, allowing them
+        to immediately skip straight to the healthy fallback model.
+        """
+        if not model_name:
+            return
+        norm_name = model_name.strip()
+        cooldown_until = time.time() + cooldown_seconds
+        _MODEL_COOLDOWNS[norm_name] = cooldown_until
+        logger.warning(
+            f"Gemini model '{norm_name}' placed on {cooldown_seconds:.0f}s cooldown (until +{cooldown_seconds:.0f}s). "
+            f"Reason: {reason or 'rate-limited / transient error'}"
+        )
+
+    @classmethod
+    def is_model_on_cooldown(cls, model_name: str) -> bool:
+        """Check if a model is currently in its cooldown window."""
+        if not model_name:
+            return False
+        norm_name = model_name.strip()
+        cooldown_until = _MODEL_COOLDOWNS.get(norm_name, 0.0)
+        if time.time() < cooldown_until:
+            return True
+        if norm_name in _MODEL_COOLDOWNS:
+            _MODEL_COOLDOWNS.pop(norm_name, None)
+        return False
+
+    @classmethod
+    def get_prioritized_models(cls, candidates: list) -> list:
+        """
+        Reorder candidate models so healthy (non-cooldown) models appear first.
+        If the primary model was recently rate-limited, this allows the next request
+        to immediately skip straight to the fallback model without paying the round-trip
+        failure delay on the primary model again.
+        """
+        now = time.time()
+        healthy: list = []
+        in_cooldown: list = []
+
+        seen = set()
+        for m in candidates:
+            if not m or m in seen:
+                continue
+            seen.add(m)
+            norm_name = m.strip()
+            cooldown_until = _MODEL_COOLDOWNS.get(norm_name, 0.0)
+            if now < cooldown_until:
+                in_cooldown.append((cooldown_until, m))
+            else:
+                healthy.append(m)
+
+        # In-cooldown models sorted by earliest recovery time
+        in_cooldown.sort(key=lambda x: x[0])
+        cooldown_sorted = [m for _, m in in_cooldown]
+
+        result = healthy + cooldown_sorted
+        if not healthy and cooldown_sorted:
+            logger.info(f"All candidate models are on cooldown. Using earliest-expiring model: {result[0]}")
+        elif in_cooldown and healthy:
+            logger.info(
+                f"Model cooldown active: prioritizing healthy models {healthy} over cooldown models {[m for _, m in in_cooldown]}"
+            )
+
+        return result or candidates
+
+    @classmethod
+    def log_model_usage(
+        cls,
+        model_name: str,
+        is_fallback: bool = False,
+        reason: str = "",
+        timer: Any = None,
+    ) -> None:
+        """Log model used and warning if fallback was triggered."""
+        from app.core.timing import logger as timing_logger
+        req_id = getattr(timer, "request_id", "rag") if timer else "rag"
+        timing_logger.info(f"[{req_id}] model_used: {model_name}")
+        if is_fallback:
+            timing_logger.warning(f"[{req_id}] FALLBACK TRIGGERED, reason: {reason}")
+
 
     @staticmethod
     def call_with_retry(
@@ -114,3 +202,4 @@ class GeminiService:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("Gemini API call failed after retries.")
+

@@ -19,9 +19,13 @@ class RetrievalService:
         paper_id: Optional[str] = None,
         top_k: int = 4,
         similarity_threshold: float = 0.25,
+        timer: Optional[Any] = None,
     ) -> List[Citation]:
         """Perform vector search over paper_chunks and return structured context citations."""
         query_vec = self.embedding_service.embed_query(query)
+        if timer:
+            timer.mark("query_embedding")
+
         if not query_vec or query_vec[0] == 0.0:
             logger.warning("Empty query vector generated.")
             return []
@@ -32,6 +36,8 @@ class RetrievalService:
             match_count=top_k,
             filter_paper_id=paper_id,
         )
+        if timer:
+            timer.mark("vector_retrieval", extra=f"chunks={len(rpc_results)}")
 
         citations: List[Citation] = []
         for match in rpc_results:

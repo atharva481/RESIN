@@ -4,7 +4,7 @@ from typing import Optional
 from app.core.supabase import get_supabase_client
 from app.schemas.indexing import ChunkInfo, IndexPaperResponse
 from app.services.chunking import TextChunker
-from app.services.embeddings import EmbeddingService
+from app.services.embeddings import EmbeddingService, EmbeddingQuotaExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +72,21 @@ class IndexingService:
 
         try:
             vectors = self.embedding_service.embed_batch([chunk.content for chunk in chunks])
+        except EmbeddingQuotaExceeded as eq:
+            logger.error(f"Embedding quota exceeded for {paper_id}: {eq}")
+            return IndexPaperResponse(
+                paper_id=paper_id,
+                chunks_created=0,
+                chunks=[],
+                status="error",
+                message="Gemini embedding quota exceeded (429). Please wait ~60s before retrying.",
+                failure_reason="EMBEDDING_QUOTA_EXCEEDED",
+            )
         except Exception as e:
             logger.error(f"Embedding generation failed for {paper_id}: {e}")
             return IndexPaperResponse(
                 paper_id=paper_id,
-                chunks_created=len(chunks),
+                chunks_created=0,
                 chunks=chunk_infos,
                 status="error",
                 message=f"Embedding generation failed: {str(e)}",
@@ -134,9 +144,13 @@ class IndexingService:
                     logger.error(f"Failed to generate/store paper-level embedding for {paper_id}: {e}")
                     # Not fatal; we still have chunk embeddings
 
-            # Update papers.indexed_at timestamp
+            # Update papers.indexed_at timestamp and indexing status
             now_iso = datetime.now(timezone.utc).isoformat()
-            client.table("papers").update({"indexed_at": now_iso}).eq("id", paper_id).execute()
+            client.table("papers").update({
+                "indexed_at": now_iso,
+                "indexing_status": "completed",
+                "indexing_error": None,
+            }).eq("id", paper_id).execute()
 
             return IndexPaperResponse(
                 paper_id=paper_id,
@@ -153,6 +167,14 @@ class IndexingService:
                     "Table 'paper_chunks' does not exist in Supabase database. "
                     "Please run backend/migrations/full_rag_setup.sql in your Supabase SQL Editor."
                 )
+            if client:
+                try:
+                    client.table("papers").update({
+                        "indexing_status": "failed",
+                        "indexing_error": err_msg,
+                    }).eq("id", paper_id).execute()
+                except Exception as up_err:
+                    logger.warning(f"Could not record indexing error on papers table: {up_err}")
             return IndexPaperResponse(
                 paper_id=paper_id,
                 chunks_created=len(chunks),
@@ -182,7 +204,43 @@ class IndexingService:
 
         chunk_infos = []
         db_records = []
-        vectors = self.embedding_service.embed_batch([chunk.content for chunk in chunks])
+        try:
+            vectors = self.embedding_service.embed_batch([chunk.content for chunk in chunks])
+        except EmbeddingQuotaExceeded as eq:
+            logger.error(f"Embedding quota exceeded for PDF pages {paper_id}: {eq}")
+            if client:
+                try:
+                    client.table("papers").update({
+                        "indexing_status": "failed",
+                        "indexing_error": "Gemini embedding quota exceeded (429). Please wait ~60s before retrying.",
+                    }).eq("id", paper_id).execute()
+                except Exception:
+                    pass
+            return IndexPaperResponse(
+                paper_id=paper_id,
+                chunks_created=0,
+                chunks=[],
+                status="error",
+                message="Gemini embedding quota exceeded (429). Please wait ~60s before retrying.",
+                failure_reason="EMBEDDING_QUOTA_EXCEEDED",
+            )
+        except Exception as e:
+            logger.error(f"Embedding generation failed for PDF pages {paper_id}: {e}")
+            if client:
+                try:
+                    client.table("papers").update({
+                        "indexing_status": "failed",
+                        "indexing_error": f"Embedding generation failed: {str(e)}",
+                    }).eq("id", paper_id).execute()
+                except Exception:
+                    pass
+            return IndexPaperResponse(
+                paper_id=paper_id,
+                chunks_created=0,
+                chunks=[],
+                status="error",
+                message=f"Embedding generation failed: {str(e)}",
+            )
 
         for chunk, vector in zip(chunks, vectors):
             rec = {
@@ -233,7 +291,12 @@ class IndexingService:
                     logger.error(f"Failed to generate paper-level embedding: {e}")
 
             now_iso = datetime.now(timezone.utc).isoformat()
-            client.table("papers").update({"indexed_at": now_iso, "full_text": full_pdf_text[:10000]}).eq("id", paper_id).execute()
+            client.table("papers").update({
+                "indexed_at": now_iso,
+                "full_text": full_pdf_text[:10000],
+                "indexing_status": "completed",
+                "indexing_error": None,
+            }).eq("id", paper_id).execute()
 
         return IndexPaperResponse(
             paper_id=paper_id,

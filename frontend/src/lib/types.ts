@@ -92,6 +92,18 @@ export interface RagIndexResponse {
   chunks_created: number;
   status: "success" | "warning" | "error";
   message: string;
+  is_reindex?: boolean;
+  failure_reason?: string;
+}
+
+export interface PaperIndexStatus {
+  paper_id: string;
+  canonical_paper_id?: string;
+  chunk_count: number;
+  is_fully_indexed: boolean;
+  is_partial: boolean;
+  indexed_at?: string | null;
+  status: "ready" | "partial" | "not_indexed";
 }
 
 export interface TriageItem {

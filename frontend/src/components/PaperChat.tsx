@@ -1,9 +1,9 @@
 import ReactMarkdown from "react-markdown";
 import { useState, useEffect, useRef, useCallback } from "react";
-import { MessageSquare, Send, Loader2, Sparkles, BookOpen, Database, Upload, AlertCircle } from "lucide-react";
+import { MessageSquare, Send, Loader2, Sparkles, Database, Upload, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { askPaperRAG, indexPaper, streamPaperRAG, uploadPaperPdf } from "@/lib/ragApi";
+import { askPaperRAG, checkPaperIndexStatus, indexPaper, streamPaperRAG, uploadPaperPdf } from "@/lib/ragApi";
 import type { Paper, RagChatMessage } from "@/lib/types";
 import { toast } from "sonner";
 
@@ -16,6 +16,7 @@ export function PaperChat({ paper }: PaperChatProps) {
   const [messages, setMessages] = useState<RagChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingStatus, setLoadingStatus] = useState<string | null>(null);
   const [indexing, setIndexing] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [indexNotice, setIndexNotice] = useState<string | null>(null);
@@ -25,10 +26,33 @@ export function PaperChat({ paper }: PaperChatProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if ((paper as any).indexed_at) {
-      setIsIndexed(true);
-    }
-  }, [paper]);
+    let mounted = true;
+    checkPaperIndexStatus(paper.id)
+      .then((res) => {
+        if (!mounted) return;
+        if (res.canonical_paper_id) {
+          setCanonicalId(res.canonical_paper_id);
+        }
+        if (res.is_fully_indexed) {
+          setIsIndexed(true);
+          setIndexNotice(null);
+        } else if (res.is_partial) {
+          setIsIndexed(false);
+          setIndexNotice(`Incomplete index detected (${res.chunk_count} chunk${res.chunk_count > 1 ? 's' : ''}). Will automatically re-index full paper on first question.`);
+        } else {
+          setIsIndexed(false);
+        }
+      })
+      .catch(() => {
+        if (mounted && (paper as any).indexed_at) {
+          setIsIndexed(true);
+        }
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [paper.id]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -73,11 +97,16 @@ export function PaperChat({ paper }: PaperChatProps) {
       if (res.canonical_paper_id) {
         setCanonicalId(res.canonical_paper_id);
       }
-      setIsIndexed(true);
-      if (res.status === "warning" || res.chunks_created <= 1) {
+      if (res.status === "error" || (res.chunks_created === 0 && res.failure_reason === "EMBEDDING_QUOTA_EXCEEDED")) {
+        setIsIndexed(false);
+        setIndexNotice(res.message);
+        toast.error(res.message);
+      } else if (res.status === "warning" || res.chunks_created <= 1) {
+        setIsIndexed(res.chunks_created > 0);
         setIndexNotice(res.message);
         toast.warning(res.message);
       } else {
+        setIsIndexed(true);
         setIndexNotice(null);
         toast.success(res.message || "Paper indexed successfully for AI Chat.");
       }
@@ -100,13 +129,15 @@ export function PaperChat({ paper }: PaperChatProps) {
     ];
     setMessages(newHistory);
     setLoading(true);
-    setStreaming(true);
+    setStreaming(false);
+    setLoadingStatus("Verifying paper indexing...");
 
     try {
       let activeTargetId = canonicalId || paper.id;
 
       // Auto-index if not already done (fast check via backend; will not re-download if chunks exist)
       if (!isIndexed) {
+        setLoadingStatus("Fetching & indexing paper from source (discovering PDF, extracting pages)...");
         const indexRes = await indexPaper(paper.id, {
           abstract: paper.abstract || undefined,
           force: false,
@@ -119,56 +150,51 @@ export function PaperChat({ paper }: PaperChatProps) {
           activeTargetId = indexRes.canonical_paper_id;
           setCanonicalId(indexRes.canonical_paper_id);
         }
+
+        // If indexing failed or produced 0 chunks (e.g. EMBEDDING_QUOTA_EXCEEDED or no PDF found)
+        if (indexRes.status === "error" || indexRes.chunks_created === 0) {
+          setIsIndexed(false);
+          setLoading(false);
+          setStreaming(false);
+          setLoadingStatus(null);
+          const errText = indexRes.message || "Failed to index paper content.";
+          if (indexRes.failure_reason === "EMBEDDING_QUOTA_EXCEEDED") {
+            toast.error(errText);
+          } else {
+            toast.warning(errText);
+          }
+          setIndexNotice(errText);
+          setMessages((prev) => [
+            ...prev,
+            { role: "assistant", content: `⚠️ **Indexing Notice:** ${errText}` },
+          ]);
+          return;
+        }
+
         setIsIndexed(true);
+        if (indexRes.is_reindex) {
+          toast.info(indexRes.message || "Recovered from incomplete index and re-indexed full paper.");
+        }
       }
 
-      await streamPaperRAG(
+      setLoadingStatus("Searching paper chunks & generating answer...");
+      const response = await askPaperRAG(
         activeTargetId,
         userMessage,
         newHistory,
-        (chunk) => {
-          setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (last?.role === "assistant") {
-              return [...prev.slice(0, -1), { ...last, content: last.content + chunk }];
-            }
-            return [...prev, { role: "assistant", content: chunk, citations: [] }];
-          });
-        },
-        () => {
-          setStreaming(false);
-          setLoading(false);
-        },
-        async (err) => {
-          console.warn("Stream failed, falling back to non-streaming:", err);
-          setStreaming(false);
-          try {
-            // Clear out any partial streaming message before calling fallback
-            setMessages(newHistory);
-            const response = await askPaperRAG(
-              activeTargetId,
-              userMessage,
-              newHistory,
-              paper.doi,
-              paper.title,
-            );
-            setMessages([
-              ...newHistory,
-              { role: "assistant", content: response.answer, citations: response.citations },
-            ]);
-          } catch (fallbackErr) {
-            toast.error(fallbackErr instanceof Error ? fallbackErr.message : "Failed to get answer from AI.");
-          } finally {
-            setLoading(false);
-          }
-        },
         paper.doi,
         paper.title,
       );
+      setMessages([
+        ...newHistory,
+        { role: "assistant", content: response.answer, citations: response.citations },
+      ]);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed to get answer from AI.");
-      setStreaming(false);
+    } finally {
       setLoading(false);
+      setStreaming(false);
+      setLoadingStatus(null);
     }
   }, [input, loading, isIndexed, messages, canonicalId, paper.id, paper.doi, paper.title]);
 
@@ -277,25 +303,6 @@ export function PaperChat({ paper }: PaperChatProps) {
                   msg.content
                 )}
               </div>
-
-              {/* Citations Badges */}
-              {msg.citations && msg.citations.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 pt-1 max-w-[85%]">
-                  {msg.citations.map((cite, idx) => (
-                    <span
-                      key={idx}
-                      title={`${cite.paper_title || ''}\nSnippet: ${cite.content_snippet}`}
-                      className="inline-flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded-full bg-accent/30 text-accent-foreground border border-border"
-                    >
-                      <BookOpen className="h-2.5 w-2.5" />
-                      {cite.paper_title ? `${cite.paper_title.slice(0, 20)}... | ` : ''}
-                      {cite.page_number ? `p. ${cite.page_number} | ` : ''}
-                      {cite.section_title || `Chunk #${cite.chunk_index}`}
-                    </span>
-                  ))}
-
-                </div>
-              )}
             </div>
           ))
         )}
@@ -303,7 +310,7 @@ export function PaperChat({ paper }: PaperChatProps) {
         {loading && !streaming && (
           <div className="flex items-center gap-2 text-muted-foreground text-xs p-2">
             <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-            Searching paper chunks & generating answer...
+            <span>{loadingStatus || "Searching paper chunks & generating answer..."}</span>
           </div>
         )}
         <div ref={messagesEndRef} />

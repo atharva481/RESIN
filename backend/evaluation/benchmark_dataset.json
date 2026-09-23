@@ -1,0 +1,66 @@
+[
+  {
+    "id": "lemur_q1",
+    "paper_id": "05c30b4d-684e-46aa-8264-5e8476ca699c",
+    "paper_title": "Lemur: Harmonizing Natural Language and Code for Language Agents",
+    "question": "What is the primary objective of Lemur and Lemur-Chat?",
+    "ground_truth_answer": "Lemur and Lemur-Chat are openly accessible language models designed to harmonize natural language and coding capabilities specifically for language agents. They aim to achieve strong performance across both natural language reasoning and code execution scenarios.",
+    "relevant_keywords": ["harmonizing", "natural language", "code", "language agents", "lemur-chat", "capabilities"]
+  },
+  {
+    "id": "lemur_q2",
+    "paper_id": "05c30b4d-684e-46aa-8264-5e8476ca699c",
+    "paper_title": "Lemur: Harmonizing Natural Language and Code for Language Agents",
+    "question": "How many epochs was training conducted on the instruction fine-tuning data for Lemur?",
+    "ground_truth_answer": "Training was conducted on the instruction fine-tuning data for 2 epochs after deduplication and filtering.",
+    "relevant_keywords": ["epochs", "training", "instruction fine-tuning", "deduplicate"]
+  },
+  {
+    "id": "gnn_q1",
+    "paper_id": "e7f825ff-562c-461a-b6ae-1a2540fb70cd",
+    "paper_title": "The Graph Neural Network Model",
+    "question": "What kind of data structure does the Graph Neural Network (GNN) model directly process?",
+    "ground_truth_answer": "The Graph Neural Network (GNN) model directly processes graph structures (graphs), including directed, undirected, and cyclic graphs, without requiring transformation into vectors or sequences.",
+    "relevant_keywords": ["graph", "cyclic", "nodes", "edges", "neural network", "transition function"]
+  },
+  {
+    "id": "gnn_q2",
+    "paper_id": "e7f825ff-562c-461a-b6ae-1a2540fb70cd",
+    "paper_title": "The Graph Neural Network Model",
+    "question": "How does the GNN model compute states for nodes in a graph?",
+    "ground_truth_answer": "The GNN computes states for each node through an iterative transition function that aggregates information from the node's local neighborhood (neighboring nodes, edges, and labels) until reaching a stationary point or fixed point defined by the Banach fixed point theorem.",
+    "relevant_keywords": ["transition function", "state", "neighborhood", "fixed point", "banach", "local"]
+  },
+  {
+    "id": "qec_q1",
+    "paper_id": "b2350582-a497-4b41-a042-903e2d19acae",
+    "paper_title": "Quantum Error Correction for Beginners",
+    "question": "Why is quantum error correction necessary for practical quantum computing?",
+    "ground_truth_answer": "Quantum error correction is necessary because quantum states are fragile and susceptible to environmental noise and decoherence, which cause bit flips and phase flips that corrupt quantum information during computation.",
+    "relevant_keywords": ["fragile", "decoherence", "noise", "bit flip", "phase flip", "quantum states", "error correction"]
+  },
+  {
+    "id": "qec_q2",
+    "paper_id": "b2350582-a497-4b41-a042-903e2d19acae",
+    "paper_title": "Quantum Error Correction for Beginners",
+    "question": "What is syndrome measurement in quantum error correction?",
+    "ground_truth_answer": "Syndrome measurement is a measurement performed on ancilla qubits to diagnose and detect the type and location of errors (bit flips or phase flips) without collapsing the superposition of the logical data qubits.",
+    "relevant_keywords": ["syndrome", "measurement", "ancilla", "diagnose", "logical", "superposition", "detect"]
+  },
+  {
+    "id": "entangle_q1",
+    "paper_id": "51d22369-4f54-49cd-803f-47a526d90b4b",
+    "paper_title": "Mixed-state entanglement and quantum error correction",
+    "question": "What is the relationship between quantum error-correcting codes and mixed-state entanglement distillation?",
+    "ground_truth_answer": "Quantum error-correcting codes and mixed-state entanglement purification/distillation protocols are closely related, as one-way entanglement distillation protocols can be constructed directly from quantum error-correcting codes to purify noisy entangled states over imperfect channels.",
+    "relevant_keywords": ["distillation", "purification", "mixed-state", "quantum error-correcting", "channel", "fidelity"]
+  },
+  {
+    "id": "tripod_q1",
+    "paper_id": "048f15e2-b706-402b-8a79-e84527ac3aa8",
+    "paper_title": "TRIPOD+AI statement: updated guidance for reporting clinical prediction models",
+    "question": "What is the main purpose of the TRIPOD+AI statement?",
+    "ground_truth_answer": "The TRIPOD+AI statement provides updated guidelines and an evidence-based reporting checklist for clinical prediction models that use regression or machine learning/artificial intelligence methods to ensure transparency, reproducibility, and risk-of-bias minimization.",
+    "relevant_keywords": ["tripod+ai", "clinical prediction models", "reporting checklist", "machine learning", "regression", "guidance"]
+  }
+]

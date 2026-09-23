@@ -94,19 +94,73 @@ class RAGService:
         for m in raw:
             if m and m not in unique:
                 unique.append(m)
-        return unique
+        return GeminiService.get_prioritized_models(unique)
+
+    def _get_unindexed_paper_message(self, paper_id: str, client: Optional[Any] = None) -> str:
+        """
+        Differentiate between in-progress/not-yet-attempted indexing and attempted-and-failed indexing.
+        Check papers table's status/error fields.
+        """
+        if not client:
+            client = get_supabase_client()
+
+        paper_row = None
+        if client and paper_id:
+            try:
+                res = client.table("papers").select("indexing_status,indexing_error").eq("id", paper_id).limit(1).execute()
+                if not res.data:
+                    res = client.table("papers").select("indexing_status,indexing_error").or_(
+                        f"semantic_scholar_id.eq.{paper_id},arxiv_id.eq.{paper_id}"
+                    ).limit(1).execute()
+                if res.data:
+                    paper_row = res.data[0]
+            except Exception as e:
+                logger.warning(f"Could not query indexing status for paper {paper_id}: {e}")
+
+        status = (paper_row.get("indexing_status") or "").lower() if paper_row else ""
+        error = paper_row.get("indexing_error") if paper_row else None
+
+        if status == "failed" or error:
+            reason = error or "Unknown failure reason"
+            return f"Indexing failed: {reason}. Try re-indexing or use a different source PDF."
+
+        return "This paper hasn't finished indexing yet. Please wait a moment and try again."
 
     def answer_question(
         self,
         paper_id: str,
         question: str,
         history: Optional[List[ChatMessage]] = None,
+        timer: Optional[Any] = None,
     ) -> ChatResponse:
         """Retrieve relevant context and generate answer using Gemini (single paper)."""
+        client = get_supabase_client()
+        chunk_count = 0
+        if client and paper_id:
+            try:
+                chk = client.table("paper_chunks").select("id", count="exact").eq("paper_id", paper_id).limit(1).execute()
+                chunk_count = chk.count or 0
+            except Exception as chk_e:
+                logger.warning(f"Could not check chunk count for {paper_id}: {chk_e}")
+                chunk_count = 5
+        if timer:
+            timer.mark("index_cache_check", extra=f"chunks={chunk_count}")
+
+        # Short-circuit immediately if unindexed to avoid wasting ~900ms on query_embedding and retrieval RPC
+        if chunk_count == 0:
+            if timer:
+                timer.mark("skipped_empty_index")
+            answer_text = self._get_unindexed_paper_message(paper_id, client)
+            return ChatResponse(
+                answer=answer_text,
+                citations=[],
+            )
+
         citations = self.retrieval_service.retrieve_context(
             query=question,
             paper_id=paper_id,
             top_k=3,
+            timer=timer,
         )
 
         intent = detect_question_intent(question)
@@ -129,13 +183,27 @@ class RAGService:
             prompt = f"Previous conversation:\n" + "\n".join(compact_convo) + f"\n\nCurrent Question: {question}"
 
         full_prompt = f"{system_instruction}\n\n{prompt}"
-        models = self._get_chat_models()
+        if timer:
+            timer.mark("context_assembly")
 
+        models = self._get_chat_models()
+        default_primary = self.model_name
         last_error = None
-        for m_name in models:
+
+        for idx, m_name in enumerate(models):
+            is_fallback = (m_name != default_primary) or (idx > 0)
+            fallback_reason = f"Previous attempt failed ({last_error})" if idx > 0 else ("Primary model on cooldown" if m_name != default_primary else "")
+            GeminiService.log_model_usage(
+                model_name=m_name,
+                is_fallback=is_fallback,
+                reason=fallback_reason,
+                timer=timer,
+            )
             try:
                 model = genai.GenerativeModel(model_name=m_name)
                 response = _with_retry(model.generate_content, full_prompt)
+                if timer:
+                    timer.mark("generation_complete")
                 raw_answer = response.text if response and hasattr(response, "text") else "No answer generated."
                 clean_answer = clean_markdown_output(raw_answer)
                 return ChatResponse(answer=clean_answer, citations=citations)
@@ -146,12 +214,10 @@ class RAGService:
                     logger.error(f"Gemini daily quota exhausted in answer_question: {e}")
                     user_msg = "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
                     return ChatResponse(answer=user_msg, citations=citations)
-                if is_transient:
-                    # Do not cascade through all models on 429; the entire API key is rate limited
-                    logger.warning(f"Gemini rate limit reached on {m_name}. Fast failing to avoid retry cascade.")
-                    user_msg = "Gemini rate limit reached (429). Please wait ~5 seconds and ask your question again."
-                    return ChatResponse(answer=user_msg, citations=citations)
-                logger.warning(f"Chat model {m_name} failed: {e}. Trying next chat model...")
+
+                # Mark this model on 60s cooldown so subsequent requests skip straight to healthy fallback
+                GeminiService.mark_model_cooldown(m_name, cooldown_seconds=60.0, reason=str(e))
+                logger.warning(f"Chat model {m_name} failed ({e}). Marked on 60s cooldown; trying next prioritized model...")
 
         err_msg = str(last_error)
         is_daily, is_transient, _ = classify_gemini_error(last_error) if last_error else (False, False, 0)
@@ -172,7 +238,7 @@ class RAGService:
         folder_id: Optional[str] = None,
         history: Optional[List[ChatMessage]] = None,
         top_k: int = 5,
-        similarity_threshold: float = 0.25,
+        similarity_threshold: float = 0.20,
     ) -> ChatResponse:
         """Retrieve relevant papers for a user (optionally folder) and generate answer using Gemini."""
         # 1. Get candidate paper IDs with similarity scores
@@ -262,91 +328,157 @@ class RAGService:
         paper_id: str,
         question: str,
         history: Optional[List[ChatMessage]] = None,
+        timer: Optional[Any] = None,
+        user_id: Optional[str] = None,
     ) -> Generator[str, None, None]:
         """Stream RAG response chunks as Server-Sent Events."""
         try:
-            citations = self.retrieval_service.retrieve_context(
-                query=question,
-                paper_id=paper_id,
-                top_k=3,
-            )
-            intent = detect_question_intent(question)
-            fmt_instructions = get_intent_formatting_instructions(intent)
-            context_str = self._format_context(citations)
-            system_instruction = SYSTEM_RAG_PROMPT.format(
-                formatting_instructions=fmt_instructions,
-                context_blocks=context_str,
-            )
-        except Exception as e:
-            logger.error(f"Retrieval error in stream: {e}")
-            err_payload = json.dumps({"error": f"Retrieval failed: {str(e)}"})
-            yield f"data: {err_payload}\n\n"
-            return
+            # 1. Guard against unindexed / partial-indexed papers
+            client = get_supabase_client()
+            chunk_count = 0
+            if client and paper_id:
+                try:
+                    chk = client.table("paper_chunks").select("id", count="exact").eq("paper_id", paper_id).limit(1).execute()
+                    chunk_count = chk.count or 0
+                except Exception as chk_e:
+                    logger.warning(f"Could not check chunk count for {paper_id}: {chk_e}")
+                    chunk_count = 5  # Assume okay on db error to not block user
 
-        prompt = question
-        if history:
-            # Compact history to last 2 turns with trimmed assistant replies to avoid free-tier TPM quota exhaustion
-            compact_convo = []
-            for msg in history[-2:]:
-                content = msg.content
-                if msg.role == "assistant" and len(content) > 250:
-                    content = content[:250].rsplit(" ", 1)[0] + "..."
-                compact_convo.append(f"{msg.role.capitalize()}: {content}")
-            prompt = f"Previous conversation:\n" + "\n".join(compact_convo) + f"\n\nCurrent Question: {question}"
+            if timer:
+                timer.mark("index_cache_check", extra=f"chunks={chunk_count}")
 
-        full_prompt = f"{system_instruction}\n\n{prompt}"
-        models = self._get_chat_models()
-
-        stream_started = False
-        last_error = None
-
-        for m_name in models:
-            try:
-                model = genai.GenerativeModel(model_name=m_name)
-                response = _with_retry(model.generate_content, full_prompt, stream=True)
-                for chunk in response:
+            if chunk_count == 0:
+                if timer:
+                    timer.mark("skipped_empty_index")
+                answer_text = self._get_unindexed_paper_message(paper_id, client)
+                if user_id:
                     try:
-                        text = chunk.text
-                        if text:
-                            stream_started = True
-                            payload = json.dumps({"text": text})
-                            yield f"data: {payload}\n\n"
+                        from app.services.chat_service import save_chat_turn
+                        save_chat_turn(user_id, None, "user", question)
+                        save_chat_turn(user_id, None, "assistant", answer_text)
+                    except Exception as he:
+                        logger.warning(f"Could not save chat turn for short-circuit: {he}")
+                yield f"data: {json.dumps({'text': answer_text})}\n\n"
+                return
 
-                    except Exception as chunk_err:
-                        logger.warning(f"Skipping unreadable stream chunk: {chunk_err}")
-                if stream_started:
-                    return
+            if 0 < chunk_count < 5:
+                notice = f"> ⚠️ **Notice:** This paper was only partially indexed ({chunk_count} chunk{'s' if chunk_count > 1 else ''}). Answers may lack complete evidence. Click **Re-index** above to fetch and index the complete manuscript.\n\n"
+                yield f"data: {json.dumps({'text': notice})}\n\n"
+
+            # 2. Retrieve evidence context
+            try:
+                citations = self.retrieval_service.retrieve_context(
+                    query=question,
+                    paper_id=paper_id,
+                    top_k=3,
+                    timer=timer,
+                )
+                intent = detect_question_intent(question)
+                fmt_instructions = get_intent_formatting_instructions(intent)
+                context_str = self._format_context(citations)
+                system_instruction = SYSTEM_RAG_PROMPT.format(
+                    formatting_instructions=fmt_instructions,
+                    context_blocks=context_str,
+                )
             except Exception as e:
-                last_error = e
-                is_daily, is_transient, _ = classify_gemini_error(e)
-                if is_daily:
-                    logger.error(f"Gemini daily quota exhausted in stream_answer: {e}")
-                    err_payload = json.dumps({
-                        "error": "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
-                    })
-                    yield f"data: {err_payload}\n\n"
-                    return
-                if is_transient:
-                    logger.warning(f"Gemini rate limit reached on {m_name}. Fast failing to avoid retry cascade.")
-                    err_payload = json.dumps({
-                        "error": "Gemini rate limit reached (429). Please wait ~5 seconds before sending your next question."
-                    })
-                    yield f"data: {err_payload}\n\n"
-                    return
-                logger.warning(f"Streaming chat model {m_name} failed: {e}")
-                if stream_started:
-                    # Do not attempt secondary models if streaming has already started to client
-                    err_payload = json.dumps({"error": f"Stream interrupted: {str(e)}"})
-                    yield f"data: {err_payload}\n\n"
-                    return
+                logger.error(f"Retrieval error in stream: {e}")
+                err_payload = json.dumps({"error": f"Retrieval failed: {str(e)}"})
+                yield f"data: {err_payload}\n\n"
+                return
 
-        if not stream_started and last_error:
-            is_daily, is_transient, _ = classify_gemini_error(last_error)
-            if is_daily:
-                user_msg = "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
-            elif is_transient:
-                user_msg = "Gemini rate limit reached (429). Please wait ~10 seconds before asking again."
-            else:
-                user_msg = f"Streaming error: {str(last_error)}"
-            err_payload = json.dumps({"error": user_msg})
-            yield f"data: {err_payload}\n\n"
+            prompt = question
+            if history:
+                # Compact history to last 2 turns with trimmed assistant replies to avoid free-tier TPM quota exhaustion
+                compact_convo = []
+                for msg in history[-2:]:
+                    content = msg.content
+                    if msg.role == "assistant" and len(content) > 250:
+                        content = content[:250].rsplit(" ", 1)[0] + "..."
+                    compact_convo.append(f"{msg.role.capitalize()}: {content}")
+                prompt = f"Previous conversation:\n" + "\n".join(compact_convo) + f"\n\nCurrent Question: {question}"
+
+            full_prompt = f"{system_instruction}\n\n{prompt}"
+            if timer:
+                timer.mark("context_assembly")
+
+            models = self._get_chat_models()
+            default_primary = self.model_name
+            stream_started = False
+            first_token_received = False
+            last_error = None
+
+            for idx, m_name in enumerate(models):
+                is_fallback = (m_name != default_primary) or (idx > 0)
+                fallback_reason = f"Previous model attempt failed ({last_error})" if idx > 0 else ("Primary model on cooldown" if m_name != default_primary else "")
+                GeminiService.log_model_usage(
+                    model_name=m_name,
+                    is_fallback=is_fallback,
+                    reason=fallback_reason,
+                    timer=timer,
+                )
+                try:
+                    model = genai.GenerativeModel(model_name=m_name)
+                    response = _with_retry(model.generate_content, full_prompt, stream=True)
+                    full_response_text = ""
+                    for chunk in response:
+                        try:
+                            text = chunk.text
+                            if text:
+                                full_response_text += text
+                                if not first_token_received:
+                                    first_token_received = True
+                                    if timer:
+                                        timer.mark("ttft")
+                                stream_started = True
+                                payload = json.dumps({"text": text})
+                                yield f"data: {payload}\n\n"
+
+                        except Exception as chunk_err:
+                            logger.warning(f"Skipping unreadable stream chunk: {chunk_err}")
+                    if stream_started:
+                        if timer:
+                            timer.mark("generation_complete")
+                        if user_id and full_response_text:
+                            try:
+                                from app.services.chat_service import save_chat_turn
+                                save_chat_turn(user_id, None, "user", question)
+                                save_chat_turn(user_id, None, "assistant", full_response_text)
+                            except Exception as he:
+                                logger.warning(f"Could not save streaming chat turn: {he}")
+                        return
+                except Exception as e:
+                    last_error = e
+                    is_daily, is_transient, _ = classify_gemini_error(e)
+                    if is_daily:
+                        logger.error(f"Gemini daily quota exhausted in stream_answer: {e}")
+                        err_payload = json.dumps({
+                            "error": "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
+                        })
+                        yield f"data: {err_payload}\n\n"
+                        return
+
+                    # Mark this model on 60s cooldown so subsequent requests skip straight to healthy fallback
+                    GeminiService.mark_model_cooldown(m_name, cooldown_seconds=60.0, reason=str(e))
+
+                    if stream_started:
+                        # Do not attempt secondary models if streaming has already partially delivered tokens to client
+                        err_payload = json.dumps({"error": f"Stream interrupted: {str(e)}"})
+                        yield f"data: {err_payload}\n\n"
+                        return
+
+                    logger.warning(f"Streaming chat model {m_name} failed ({e}). Trying next prioritized model...")
+
+            if not stream_started and last_error:
+                is_daily, is_transient, _ = classify_gemini_error(last_error)
+                if is_daily:
+                    user_msg = "⚠️ Gemini API daily quota reached (429 RESOURCE_EXHAUSTED). Please wait for your daily quota to reset or upgrade your tier in Google AI Studio."
+                elif is_transient:
+                    user_msg = "Gemini rate limit reached (429). Please wait ~5 seconds before sending your next question."
+                else:
+                    user_msg = f"Streaming error: {str(last_error)}"
+                err_payload = json.dumps({"error": user_msg})
+                yield f"data: {err_payload}\n\n"
+        finally:
+            if timer:
+                from app.core.timing import logger as timing_logger
+                timing_logger.info(f"[{timer.request_id}] SUMMARY: {timer.summary()}")

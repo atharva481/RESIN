@@ -1,5 +1,5 @@
 import { supabase } from "./supabase";
-import { RagChatMessage, RagChatResponse, RagIndexResponse } from "./types";
+import { PaperIndexStatus, RagChatMessage, RagChatResponse, RagIndexResponse } from "./types";
 
 const BACKEND_URL = import.meta.env.VITE_RAG_BACKEND_URL || "http://localhost:8000";
 
@@ -10,6 +10,17 @@ async function getAuthHeader(): Promise<HeadersInit> {
     "Content-Type": "application/json",
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
+}
+
+export async function checkPaperIndexStatus(paperId: string): Promise<PaperIndexStatus> {
+  const headers = await getAuthHeader();
+  const response = await fetch(`${BACKEND_URL}/api/papers/${paperId}/index-status`, {
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to check index status: ${response.statusText}`);
+  }
+  return response.json();
 }
 
 export interface IndexPaperOptions {

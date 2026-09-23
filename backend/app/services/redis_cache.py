@@ -16,7 +16,7 @@ class RedisCacheService:
             self.client.ping()
             self.available = True
         except Exception as e:
-            logger.warning(f"Redis cache unavailable at {redis_url}: {e}")
+            logger.debug(f"Redis cache unavailable at {redis_url}: {e}")
             self.client = None
             self.available = False
 

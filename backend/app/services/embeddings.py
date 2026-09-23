@@ -76,6 +76,11 @@ def _enforce_768_dims(val: Any) -> Any:
 from app.services.gemini_service import GeminiService
 
 
+class EmbeddingQuotaExceeded(Exception):
+    """Raised when Gemini embedding API hits rate limit or quota exhaustion (429/RESOURCE_EXHAUSTED)."""
+    pass
+
+
 class EmbeddingService:
     """Service for generating text embeddings using Gemini embedding models."""
 
@@ -84,27 +89,36 @@ class EmbeddingService:
         _ensure_configured()
 
     def _call_embed(self, contents: Any, task_type: str):
-        """Call genai.embed_content with 768-dim truncation and centralized quota handling."""
+        """Call genai.embed_content with 768-dim truncation and fail-fast quota handling."""
         model = self.model_name
         try:
-            res = GeminiService.call_with_retry(
-                genai.embed_content,
+            res = genai.embed_content(
                 model=model,
                 content=contents,
                 task_type=task_type,
                 output_dimensionality=768,
             )
+            return _enforce_768_dims(res)
         except Exception as inner_err:
-            err_str = str(inner_err)
-            if "daily quota" in err_str.lower() or "resource_exhausted" in err_str.lower():
-                raise inner_err
+            err_str = str(inner_err).lower()
+            # If rate limit or quota exhausted, fail fast immediately: do not retry, do not cascade
+            if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str or "rate limit" in err_str:
+                logger.error(f"Gemini embedding quota/rate limit hit (429): {inner_err}")
+                raise EmbeddingQuotaExceeded(str(inner_err)) from inner_err
+
             # Fallback for models or API wrappers that do not accept task_type/output_dimensionality parameters
-            res = GeminiService.call_with_retry(
-                genai.embed_content,
-                model=model,
-                content=contents,
-            )
-        return _enforce_768_dims(res)
+            try:
+                res = genai.embed_content(
+                    model=model,
+                    content=contents,
+                )
+                return _enforce_768_dims(res)
+            except Exception as e2:
+                err_str2 = str(e2).lower()
+                if "429" in err_str2 or "quota" in err_str2 or "resource_exhausted" in err_str2 or "rate limit" in err_str2:
+                    logger.error(f"Gemini embedding quota hit (429): {e2}")
+                    raise EmbeddingQuotaExceeded(str(e2)) from e2
+                raise e2
 
     def embed_text(self, text: str) -> List[float]:
         """Generate 768-dim embedding vector for a single text query or document."""
@@ -112,10 +126,14 @@ class EmbeddingService:
 
     def embed_query(self, query: str) -> List[float]:
         """Generate 768-dim embedding vector for a search query."""
-        return self._call_embed(query, task_type="retrieval_query")
+        try:
+            return self._call_embed(query, task_type="retrieval_query")
+        except EmbeddingQuotaExceeded as eq:
+            logger.warning(f"Query embedding hit quota: {eq}")
+            return []
 
     def embed_batch(self, texts: List[str], batch_size: int = 100) -> List[List[float]]:
-        """Generate embeddings for a list of text chunks in a single fast batch call, with fallback."""
+        """Generate embeddings for a list of text chunks in a single fast batch call, with payload-size fallback."""
         if not texts:
             return []
         # Fast path: send all chunks in 1 call (typically ~2 seconds for 50-60 chunks)
@@ -126,11 +144,14 @@ class EmbeddingService:
                     return res
                 elif isinstance(res, list) and res and isinstance(res[0], (int, float)):
                     return [res]
+            except EmbeddingQuotaExceeded:
+                # Stop immediately: do not hammer quota with sub-batches
+                raise
             except Exception as e:
                 err_str = str(e).lower()
-                if "daily quota" in err_str or "resource_exhausted" in err_str:
-                    raise e
-                logger.warning(f"Single batch embedding of {len(texts)} chunks failed ({e}). Splitting into sub-batches...")
+                if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
+                    raise EmbeddingQuotaExceeded(str(e)) from e
+                logger.warning(f"Single batch embedding of {len(texts)} chunks failed ({e}). Splitting into sub-batches for payload size...")
 
         all_embeddings: List[List[float]] = []
         sub_size = 30
@@ -144,8 +165,14 @@ class EmbeddingService:
                     all_embeddings.append(res)
                 else:
                     raise ValueError(f"Unexpected embedding format: {type(res)}")
+            except EmbeddingQuotaExceeded:
+                raise
             except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "quota" in err_str or "resource_exhausted" in err_str:
+                    raise EmbeddingQuotaExceeded(str(e)) from e
                 logger.error(f"Batch embedding failed at index {i}: {e}")
                 raise e
 
         return all_embeddings
+

@@ -24,6 +24,9 @@ CREATE INDEX IF NOT EXISTS paper_chunks_paper_id_idx
 -- Optional columns on papers table
 ALTER TABLE public.papers ADD COLUMN IF NOT EXISTS indexed_at timestamptz;
 ALTER TABLE public.papers ADD COLUMN IF NOT EXISTS full_text text;
+ALTER TABLE public.papers ADD COLUMN IF NOT EXISTS indexing_status text;
+ALTER TABLE public.papers ADD COLUMN IF NOT EXISTS indexing_error text;
+
 
 -- Stored procedure for chunk vector similarity search
 CREATE OR REPLACE FUNCTION public.match_paper_chunks(

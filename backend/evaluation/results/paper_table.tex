@@ -1,0 +1,30 @@
+\begin{table}[htbp]
+\centering
+\caption{End-to-End Evaluation of the RESIN Academic RAG Framework across Retrieval, Generation, and Grounding Metrics.}
+\label{tab:resin_rag_benchmarks}
+\begin{tabular}{l l c}
+\hline
+\textbf{Evaluation Dimension} & \textbf{Evaluation Metric} & \textbf{Score (Mean $\pm$ Std)} \\
+\hline
+\multirow{4}{*}{\textbf{Information Retrieval (IR)}}
+& MRR (Mean Reciprocal Rank) & 0.9167 $\pm$ 0.2205 \\
+& NDCG@3                     & 0.9375 $\pm$ 0.1654 \\
+& NDCG@5                     & 0.9375 $\pm$ 0.1654 \\
+& Hit@3 / Recall@3           & 1.0000 $\pm$ 0.0000 \\
+& Hit@5 / Recall@5           & 1.0000 $\pm$ 0.0000 \\
+\hline
+\multirow{6}{*}{\textbf{Text Generation Overlap}}
+& BLEU-1                     & 0.1680 $\pm$ 0.0747 \\
+& BLEU-2                     & 0.0871 $\pm$ 0.0667 \\
+& BLEU-4                     & 0.0339 $\pm$ 0.0372 \\
+& ROUGE-1 ($F_1$)            & 0.2333 $\pm$ 0.0974 \\
+& ROUGE-2 ($F_1$)            & 0.0759 $\pm$ 0.0563 \\
+& ROUGE-L ($F_1$)            & 0.1787 $\pm$ 0.0803 \\
+\hline
+\multirow{3}{*}{\textbf{RAGAS Triad (Grounding)}}
+& Context Precision          & 0.9938 $\pm$ 0.0165 \\
+& Context Recall             & 0.7856 $\pm$ 0.1836 \\
+& Faithfulness (Factual Fidelity) & 0.8542 $\pm$ 0.3274 \\
+\hline
+\end{tabular}
+\end{table}
