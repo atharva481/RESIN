@@ -253,8 +253,4 @@ node daily-triage.js
 For a comprehensive technical deep dive into vector math, tokenization, prompt structures, candidate queuing algorithms, and sequence diagrams, refer to:
 👉 **[`PROJECT_DETAILS_AND_RAG.md`](PROJECT_DETAILS_AND_RAG.md)**
 
----
 
-## 📄 License
-
-This project is licensed under the MIT License.
