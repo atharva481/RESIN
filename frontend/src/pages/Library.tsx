@@ -8,6 +8,7 @@ import { ConfigBanner } from "@/components/ConfigBanner";
 import { PaperCard } from "@/components/PaperCard";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select,
   SelectContent,
@@ -15,10 +16,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { FolderPlus, FolderOpen, Trash2, Loader2, Download, FileText, BookOpen, Network, ArrowUpDown } from "lucide-react";
+import { FolderPlus, FolderOpen, Trash2, Loader2, Download, FileText, BookOpen, Network, ArrowUpDown, CheckSquare, X } from "lucide-react";
 import { toast } from "sonner";
 import { toBibTeX, toAPA, toMLA, downloadText } from "@/lib/cite";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Link } from "react-router-dom";
 import type { Folder, UserPaper, Paper } from "@/lib/types";
 
@@ -42,6 +43,10 @@ export default function Library() {
   const [papers, setPapers] = useState<(UserPaper & { paper: Paper })[]>([]);
   const [loadingPapers, setLoadingPapers] = useState(false);
 
+  // Multi-select State
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
   // Sort State (persisted per folder in localStorage)
   const [sortBy, setSortBy] = useState<LibrarySortOption>(() => {
     return (
@@ -58,6 +63,9 @@ export default function Library() {
     } else {
       setSortBy("date_desc");
     }
+    // Reset selection when switching folders
+    setSelectMode(false);
+    setSelectedIds(new Set());
   }, [activeFolder]);
 
   const handleSortChange = (newSort: LibrarySortOption) => {
@@ -172,15 +180,50 @@ export default function Library() {
     }
   };
 
-  const handleExport = (fmt: "bib" | "apa" | "mla") => {
-    const items = sortedPapers.map((up) => up.paper);
-    if (!items.length) { toast.error("Nothing to export yet"); return; }
+  // ── Selection helpers ────────────────────────────────────────────────────
+  const allIds = useMemo(() => sortedPapers.map((up) => up.paper.id), [sortedPapers]);
+  const allSelected = allIds.length > 0 && allIds.every((id) => selectedIds.has(id));
+  const someSelected = selectedIds.size > 0;
+
+  const toggleSelectMode = () => {
+    setSelectMode((v) => !v);
+    setSelectedIds(new Set());
+  };
+
+  const togglePaper = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  const selectAll = () => setSelectedIds(new Set(allIds));
+  const clearAll = () => setSelectedIds(new Set());
+
+  // ── Export helpers ────────────────────────────────────────────────────────
+  const getExportItems = (scope: "all" | "selected"): Paper[] => {
+    if (scope === "selected") {
+      return sortedPapers
+        .filter((up) => selectedIds.has(up.paper.id))
+        .map((up) => up.paper);
+    }
+    return sortedPapers.map((up) => up.paper);
+  };
+
+  const handleExport = (fmt: "bib" | "apa" | "mla", scope: "all" | "selected" = "all") => {
+    const items = getExportItems(scope);
+    if (!items.length) {
+      toast.error(scope === "selected" ? "No papers selected" : "Nothing to export yet");
+      return;
+    }
     const folderName = folders.find((f) => f.id === activeFolder)?.name ?? "library";
     const safe = folderName.replace(/[^a-z0-9]/gi, "-").toLowerCase();
-    if (fmt === "bib") downloadText(`${safe}.bib`, toBibTeX(items));
-    if (fmt === "apa") downloadText(`${safe}-apa.txt`, toAPA(items));
-    if (fmt === "mla") downloadText(`${safe}-mla.txt`, toMLA(items));
-    toast.success("Exported");
+    const suffix = scope === "selected" ? "-selected" : "";
+    if (fmt === "bib") downloadText(`${safe}${suffix}.bib`, toBibTeX(items));
+    if (fmt === "apa") downloadText(`${safe}${suffix}-apa.txt`, toAPA(items));
+    if (fmt === "mla") downloadText(`${safe}${suffix}-mla.txt`, toMLA(items));
+    toast.success(`Exported ${items.length} paper${items.length !== 1 ? "s" : ""}`);
   };
 
   return (
@@ -195,14 +238,66 @@ export default function Library() {
               <Button asChild variant="outline" size="sm" className="gap-2">
                 <Link to={`/graph?folder=${activeFolder}`}><Network className="h-3.5 w-3.5" /> Open graph</Link>
               </Button>
+
+              {/* Select mode toggle */}
+              <Button
+                size="sm"
+                variant={selectMode ? "secondary" : "outline"}
+                className="gap-2"
+                onClick={toggleSelectMode}
+              >
+                {selectMode ? (
+                  <><X className="h-3.5 w-3.5" /> Cancel</>
+                ) : (
+                  <><CheckSquare className="h-3.5 w-3.5" /> Select</>
+                )}
+              </Button>
+
+              {/* Export dropdown */}
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button size="sm" className="gap-2"><Download className="h-3.5 w-3.5" /> Export</Button>
+                  <Button size="sm" className="gap-2">
+                    <Download className="h-3.5 w-3.5" /> Export
+                    {selectMode && someSelected && (
+                      <span className="ml-1 bg-primary-foreground/20 text-primary-foreground rounded-full text-[10px] font-mono px-1.5 py-0 leading-4">
+                        {selectedIds.size}
+                      </span>
+                    )}
+                  </Button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuItem onClick={() => handleExport("bib")}>BibTeX (.bib)</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => handleExport("apa")}>APA</DropdownMenuItem>
-                  <DropdownMenuItem onClick={() => handleExport("mla")}>MLA</DropdownMenuItem>
+                <DropdownMenuContent align="end" className="w-52">
+                  <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                    Export all papers
+                  </div>
+                  <DropdownMenuItem onClick={() => handleExport("bib", "all")}>BibTeX (.bib)</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => handleExport("apa", "all")}>APA (.txt)</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => handleExport("mla", "all")}>MLA (.txt)</DropdownMenuItem>
+                  {selectMode && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <div className="px-2 py-1 text-[10px] uppercase tracking-wider text-muted-foreground font-medium">
+                        Export selected ({selectedIds.size})
+                      </div>
+                      <DropdownMenuItem
+                        onClick={() => handleExport("bib", "selected")}
+                        disabled={!someSelected}
+                      >
+                        BibTeX (.bib)
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => handleExport("apa", "selected")}
+                        disabled={!someSelected}
+                      >
+                        APA (.txt)
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => handleExport("mla", "selected")}
+                        disabled={!someSelected}
+                      >
+                        MLA (.txt)
+                      </DropdownMenuItem>
+                    </>
+                  )}
                 </DropdownMenuContent>
               </DropdownMenu>
             </>
@@ -304,6 +399,32 @@ export default function Library() {
             </div>
           </div>
 
+          {/* Selection toolbar — only visible in select mode */}
+          {selectMode && !loadingPapers && sortedPapers.length > 0 && (
+            <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-secondary/60 border border-border text-sm">
+              <Checkbox
+                id="select-all"
+                checked={allSelected}
+                onCheckedChange={(checked) => (checked ? selectAll() : clearAll())}
+                className="data-[state=checked]:bg-foreground data-[state=checked]:border-foreground"
+              />
+              <label htmlFor="select-all" className="cursor-pointer font-medium select-none">
+                {allSelected ? "Deselect all" : "Select all"}
+              </label>
+              <span className="text-muted-foreground text-xs">
+                {selectedIds.size} of {sortedPapers.length} selected
+              </span>
+              {someSelected && (
+                <button
+                  onClick={clearAll}
+                  className="ml-auto text-xs text-muted-foreground hover:text-foreground transition-smooth"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
+
           {loadingPapers && (
             <div className="flex items-center justify-center py-16 text-muted-foreground gap-2">
               <Loader2 className="h-4 w-4 animate-spin" /> Loading saved papers…
@@ -321,34 +442,61 @@ export default function Library() {
 
           <div className="grid gap-4">
             {sortedPapers.map((up) => (
-              <PaperCard
-                key={up.id}
-                paper={up.paper}
-                persistedId={up.paper.id}
-                statusBadge={
-                  <StatusPill
-                    value={up.status}
-                    onChange={async (s) => {
-                      await updateUserPaper(up.id, { status: s });
-                      fetchPapers();
-                    }}
+              <div key={up.id} className="relative flex gap-3 items-start">
+                {/* Checkbox column — only in select mode */}
+                {selectMode && (
+                  <div className="pt-4 shrink-0">
+                    <Checkbox
+                      checked={selectedIds.has(up.paper.id)}
+                      onCheckedChange={() => togglePaper(up.paper.id)}
+                      className="data-[state=checked]:bg-foreground data-[state=checked]:border-foreground"
+                      aria-label={`Select ${up.paper.title}`}
+                    />
+                  </div>
+                )}
+
+                {/* Paper card — highlighted when selected */}
+                <div
+                  className={`flex-1 min-w-0 transition-all duration-150 rounded-xl ${
+                    selectMode && selectedIds.has(up.paper.id)
+                      ? "ring-2 ring-foreground/40 ring-offset-1 ring-offset-background"
+                      : ""
+                  }`}
+                  onClick={() => selectMode && togglePaper(up.paper.id)}
+                  style={{ cursor: selectMode ? "pointer" : undefined }}
+                >
+                  <PaperCard
+                    paper={up.paper}
+                    persistedId={up.paper.id}
+                    statusBadge={
+                      <StatusPill
+                        value={up.status}
+                        onChange={async (s) => {
+                          await updateUserPaper(up.id, { status: s });
+                          fetchPapers();
+                        }}
+                      />
+                    }
+                    actionExtra={
+                      !selectMode ? (
+                        <button
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            await removeUserPaper(up.id);
+                            fetchPapers();
+                            toast.success("Removed from library");
+                          }}
+                          className="h-8 w-8 inline-flex items-center justify-center rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-smooth"
+                          title="Remove from library"
+                          aria-label="Remove from library"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      ) : undefined
+                    }
                   />
-                }
-                actionExtra={
-                  <button
-                    onClick={async () => {
-                      await removeUserPaper(up.id);
-                      fetchPapers();
-                      toast.success("Removed from library");
-                    }}
-                    className="h-8 w-8 inline-flex items-center justify-center rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-smooth"
-                    title="Remove from library"
-                    aria-label="Remove from library"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                }
-              />
+                </div>
+              </div>
             ))}
           </div>
         </section>
